@@ -5,7 +5,7 @@
 #include "sys/commands.h"
 #include "sys/defines.h"
 #include "sys/util.h"
-#include "usr/Lab2_1/task_wolfpack.h"
+#include "../task_wolfpack.h"
 #include <stdlib.h>
 #include <string.h>
 

@@ -37,15 +37,15 @@
 #define POLE_PAIRS (4.0)					// Number of pole pairs
 #define POLE_PAIRS_INV (1/POLE_PAIRS)	// Inverse of number of pole pairs
 
-#define PM_FLUX_V_SEC_PER_RAD (0)		// Flux constant of PM in Volts per ELECTRICAL rad/s
-#define VOLT_PER_HZ_V_INITAL (0)		// Volts/Hz command at zero frequency [V] - optional
+#define PM_FLUX_V_SEC_PER_RAD (0.05)	// Flux constant of PM in Volts per ELECTRICAL rad/s
+#define VOLT_PER_HZ_V_INITAL (2)		// Volts/Hz command at zero frequency [V] - optional
 
 #define WOLFPACK_VOLTAGE_MAX (40)		// Over-voltage protection level for Wolfpack Inverter
 #define WOLFPACK_CURRENT_MAX (10)		// Over-current protection level for Wolfpack Inverter
 
 #define VOLTSPERHZ_RPM_PER_SEC (100)	// Volts/Hz command rate limit [RPM/sec]
 #define VOLTSPERHZ_RPM_LIMIT (1000)		// Volts/Hz absolute limit [RPM]
-#define ENABLE_VOLTSPERHZ (0)			// Set to 1 to enable Volts/Hz output [Boolean]
+#define ENABLE_VOLTSPERHZ (1)			// Set to 1 to enable Volts/Hz output [Boolean]
 
 const uint8_t amds_port = 1;
 int LOG_amds_valid = 0;					// Status of AMDS data
@@ -87,6 +87,7 @@ double w_e_V_per_Hz = 0;				// Volts/Hz voltage frequency command [rad/s]
 
 double V_mag_manual = 1;				// Manual voltage magnitude command [V]
 double w_e_manual = PI2*2;				// Manual voltage frequency command [rad/s]
+double w_e_manual_limited = 0;			// Manual frequency command after rate limiting [rad/s]
 
 double LOG_V_mag_cmd = 0;				// Manual or Volts/Hz - this signal used for open loop voltage command
 double LOG_w_e_cmd = 0;					// Manual or Volts/Hz - this signal used for open loop frequency command
@@ -166,6 +167,21 @@ int task_wolfpack_deinit(void)
     return scheduler_tcb_unregister(&tcb);
 }
 
+// Rate limiting helper function
+// Applies rate limiting to a signal with specified max rate of change
+static inline double rate_limit(double target, double current, double max_delta)
+{
+	double delta = target - current;
+
+	if (delta >= max_delta) {
+		return current + max_delta;
+	} else if (delta <= -max_delta) {
+		return current - max_delta;
+	} else {
+		return target;
+	}
+}
+
 void task_wolfpack_callback(void *arg)
 {
     // Compute and log the loop time for this task
@@ -234,6 +250,10 @@ void task_wolfpack_callback(void *arg)
 		{
 			calibrate_count++;  		// Increment calibration counter
 		}
+		// Clear all speed references and ramping variables
+		LOG_w_m_RPM_ref_limited = 0;
+		LOG_w_m_RPM_ref = 0;
+		w_e_manual_limited = 0;
 	    LOG_v_dc_offset = (1.0-EXP_W_F_TS)*LOG_v_dc + LOG_v_dc_offset*EXP_W_F_TS;  // Low pass filter Voltage Sensor Input
 	    LOG_i_a_offset = (1.0-EXP_W_F_TS)*LOG_i_a + LOG_i_a_offset*EXP_W_F_TS;  // Low pass filter Current Sensor A Input
 	    LOG_i_b_offset = (1.0-EXP_W_F_TS)*LOG_i_b + LOG_i_b_offset*EXP_W_F_TS;  // Low pass filter Current Sensor B Input
@@ -248,6 +268,8 @@ void task_wolfpack_callback(void *arg)
 	case 1: // ************* IDLE ******************
 		LOG_pwm_state = pwm_disable(); 	// Ensure that PWMs are disabled
 		LOG_w_m_RPM_ref_limited = 0;	// Clear Volt/Hz limited reference
+		LOG_w_m_RPM_ref = 0;			// Clear Volt/Hz speed reference
+		w_e_manual_limited = 0;			// Clear manual mode limited frequency
 
 		if (LOG_protection_status)		// Transition to TRIPPED if protections are active.
 		{
@@ -309,8 +331,16 @@ void task_wolfpack_callback(void *arg)
 	{		// Inverter voltage commands come from Volts/Hz algorithm
 
 	    //*************** Insert Volts/Hertz Filtering Logic here... ****************
-		// LOG_w_m_RPM_ref_limited = ???
-		LOG_w_m_RPM_ref_limited = LOG_w_m_RPM_ref;
+		// Apply rate limiting
+		double max_delta = VOLTSPERHZ_RPM_PER_SEC * Ts;
+		LOG_w_m_RPM_ref_limited = rate_limit(LOG_w_m_RPM_ref, LOG_w_m_RPM_ref_limited, max_delta);
+
+		// Apply magnitude limit
+		if (LOG_w_m_RPM_ref_limited > VOLTSPERHZ_RPM_LIMIT) {
+		    LOG_w_m_RPM_ref_limited = VOLTSPERHZ_RPM_LIMIT;
+		} else if (LOG_w_m_RPM_ref_limited < -VOLTSPERHZ_RPM_LIMIT) {
+		    LOG_w_m_RPM_ref_limited = -VOLTSPERHZ_RPM_LIMIT;
+		}
 		w_e_V_per_Hz = POLE_PAIRS * RPM_TO_RAD_PER_SEC(LOG_w_m_RPM_ref_limited);  		// Convert V/Hz RPM command to we command [rad/s]
 		V_mag_V_per_Hz = w_e_V_per_Hz * PM_FLUX_V_SEC_PER_RAD + VOLT_PER_HZ_V_INITAL;	// Create V/Hz Voltage command from we command and estimate of flux [V]
 
@@ -319,8 +349,19 @@ void task_wolfpack_callback(void *arg)
 		}
 	else	// Inverter voltage commands come from "manual" variables sent from Python script
 		{
+		// Convert manual frequency to RPM equivalent for rate limiting
+		double w_e_manual_RPM_equiv = RAD_PER_SEC_TO_RPM(w_e_manual / POLE_PAIRS);
+		double w_e_manual_limited_RPM_equiv = RAD_PER_SEC_TO_RPM(w_e_manual_limited / POLE_PAIRS);
+
+		// Apply rate limiting in RPM
+		double max_delta_manual = VOLTSPERHZ_RPM_PER_SEC * Ts;
+		w_e_manual_limited_RPM_equiv = rate_limit(w_e_manual_RPM_equiv, w_e_manual_limited_RPM_equiv, max_delta_manual);
+
+		// Convert back to rad/s electrical
+		w_e_manual_limited = POLE_PAIRS * RPM_TO_RAD_PER_SEC(w_e_manual_limited_RPM_equiv);
+
 		LOG_V_mag_cmd = V_mag_manual;													// Assign Manual V command to inverter V command
-		LOG_w_e_cmd = w_e_manual;														// Assign Manual we command to inverter we command
+		LOG_w_e_cmd = w_e_manual_limited;												// Assign Manual we command (rate limited) to inverter we command
 		}
 
 	LOG_theta_e_cmd = theta_e_cmd_prev + LOG_w_e_cmd * Ts;		// Increment the theta e command
@@ -337,8 +378,29 @@ void task_wolfpack_callback(void *arg)
     LOG_m_cmd_c = 2*LOG_v_cmd_c/LOG_v_dc;						// Phase C modulation cmd from scaled Phase C voltage cmd
 
     //*************** Insert space vector modulation calculations here... ****************
-    // LOG_m_0 = ???
-    //
+    // SVPWM CODE START - ADD THIS CODE
+    // Find the maximum and minimum of the three phase modulation commands
+    double m_max = LOG_m_cmd_a;
+    double m_min = LOG_m_cmd_a;
+
+    if (LOG_m_cmd_b > m_max) {
+        m_max = LOG_m_cmd_b;
+    }
+    if (LOG_m_cmd_c > m_max) {
+        m_max = LOG_m_cmd_c;
+    }
+
+    if (LOG_m_cmd_b < m_min) {
+        m_min = LOG_m_cmd_b;
+    }
+    if (LOG_m_cmd_c < m_min) {
+        m_min = LOG_m_cmd_c;
+    }
+
+    // Calculate zero-sequence modulation to center the waveform
+    // This maximizes DC bus utilization and implements SVPWM
+    LOG_m_0 = -0.5 * (m_max + m_min);
+    // SVPWM CODE END
 
     LOG_m_cmd_a = LOG_m_cmd_a + LOG_m_0;						// Phase A modulation command with any common mode m_0
     LOG_m_cmd_b = LOG_m_cmd_b + LOG_m_0;						// Phase B modulation command with any common mode m_0
