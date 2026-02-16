@@ -30,9 +30,9 @@ void app_wolfpack_init(void)
     encoder_set_pulses_per_rev(20000);
 
 	//pwm_set_deadtime_ns(DEADTIME_MINIMUM_NS);
-    pwm_set_deadtime_ns(400);
-    //pwm_set_deadtime_ns(1200);
-    //pwm_set_deadtime_ns(3600);
+     pwm_set_deadtime_ns(400);
+//   pwm_set_deadtime_ns(1200);
+//   pwm_set_deadtime_ns(2400);
 	pwm_set_switching_freq(TASK_WOLFPACK_UPDATES_PER_SEC);
 	timing_manager_set_ratio(1);
 	pwm_enable_hw(1);

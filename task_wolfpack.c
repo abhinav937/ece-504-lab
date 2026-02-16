@@ -24,9 +24,9 @@
 #define THETA_M_OFFSET 1.0*(0)			// Offset angle added to raw encoder angle [rad]
 #define ENCODER_OFFSET (PIOVER2)		// Offset of AMDS encoder1 [rad/count]
 
-#define HV_SENSE_GAIN (0.0163)			// Gain of AMDS HV Sense, ch_1 [V/count]
+#define HV_SENSE_GAIN (0.016277)			// Gain of AMDS HV Sense, ch_1 [V/count]
 #define HV_SENSE_OFFSET_COUNTS (32768)	// HV Sense nominal offset [counts]
-#define CURRENT_SENSE_GAIN (0.002028) 	// Current sensor gain [A/count]
+#define CURRENT_SENSE_GAIN (0.002151) 	// Current sensor gain [A/count]
 #define CURRENT_SENSE_OFFSET_COUNTS (36572)//(28917)	// Current sensor nominal offset in counts
 
 #define CALIB_SAMPLES (10000)			// Number of control periods to sample analog sensors and perform filtered offset calc.
@@ -37,15 +37,18 @@
 #define POLE_PAIRS (4.0)					// Number of pole pairs
 #define POLE_PAIRS_INV (1/POLE_PAIRS)	// Inverse of number of pole pairs
 
-#define PM_FLUX_V_SEC_PER_RAD (0.05)	// Flux constant of PM in Volts per ELECTRICAL rad/s
-#define VOLT_PER_HZ_V_INITAL (2)		// Volts/Hz command at zero frequency [V] - optional
+#define PM_FLUX_V_SEC_PER_RAD (0.04)		// Flux constant of PM in Volts per ELECTRICAL rad/s
+#define VOLT_PER_HZ_V_INITAL (1)		// Volts/Hz command at zero frequency [V] - optional
 
 #define WOLFPACK_VOLTAGE_MAX (40)		// Over-voltage protection level for Wolfpack Inverter
 #define WOLFPACK_CURRENT_MAX (10)		// Over-current protection level for Wolfpack Inverter
 
 #define VOLTSPERHZ_RPM_PER_SEC (100)	// Volts/Hz command rate limit [RPM/sec]
 #define VOLTSPERHZ_RPM_LIMIT (1000)		// Volts/Hz absolute limit [RPM]
-#define ENABLE_VOLTSPERHZ (1)			// Set to 1 to enable Volts/Hz output [Boolean]
+#define ENABLE_VOLTSPERHZ (0)			// Set to 1 to enable Volts/Hz output [Boolean]
+
+#define CURRENT_MAX_DT_COMP (0.2)		// Phase current [A] at which dt comp is TD_PER_TS_COMP
+#define TD_PER_TS_COMP (0.004 - 0.002) 	// NOTE: the *ideal* comp for dt=400 ns is 0.004. The distortion seems better if 200 ns is removed (hence the 0.004 - 0.002).  And so-on for other dt values.
 
 const uint8_t amds_port = 1;
 int LOG_amds_valid = 0;					// Status of AMDS data
@@ -87,7 +90,6 @@ double w_e_V_per_Hz = 0;				// Volts/Hz voltage frequency command [rad/s]
 
 double V_mag_manual = 1;				// Manual voltage magnitude command [V]
 double w_e_manual = PI2*2;				// Manual voltage frequency command [rad/s]
-double w_e_manual_limited = 0;			// Manual frequency command after rate limiting [rad/s]
 
 double LOG_V_mag_cmd = 0;				// Manual or Volts/Hz - this signal used for open loop voltage command
 double LOG_w_e_cmd = 0;					// Manual or Volts/Hz - this signal used for open loop frequency command
@@ -104,11 +106,19 @@ double LOG_m_cmd_a = 0;					// abc modulation commands to inverter (after scalin
 double LOG_m_cmd_b = 0;
 double LOG_m_cmd_c = 0;
 double LOG_m_cmd_ab = 0;				// a-b L-L modulation command
-double LOG_m_0 = 0;						// Common mode modulation signal to be added to each abc phase modulation command in SVPWM or DPWM.
+double LOG_m_cmd_0 = 0;						// Common mode modulation signal to be added to each abc phase modulation command in SVPWM or DPWM.
 
 double LOG_duty_a = 0.5;				// abc duty ratio commands
 double LOG_duty_b = 0.5;
 double LOG_duty_c = 0.5;
+
+double LOG_dtcomp_a = 0;				// Deadtime compensation, Phase A
+double LOG_dtcomp_b = 0;				// Deadtime compensation, Phase B
+double LOG_dtcomp_c = 0;				// Deadtime compensation, Phase C
+
+double LOG_duty_w_comp_a = 0.5; 		// abc duty ratio commands with deadtime compensation
+double LOG_duty_w_comp_b = 0.5;
+double LOG_duty_w_comp_c = 0.5;
 
 // *************  Rotor angle, speed, and scaling, etc. variables *************
 double LOG_theta_m = 0;					// Rotor angle, mech [rad]
@@ -165,21 +175,6 @@ int task_wolfpack_deinit(void)
 {
 	pwm_disable();
     return scheduler_tcb_unregister(&tcb);
-}
-
-// Rate limiting helper function
-// Applies rate limiting to a signal with specified max rate of change
-static inline double rate_limit(double target, double current, double max_delta)
-{
-	double delta = target - current;
-
-	if (delta >= max_delta) {
-		return current + max_delta;
-	} else if (delta <= -max_delta) {
-		return current - max_delta;
-	} else {
-		return target;
-	}
 }
 
 void task_wolfpack_callback(void *arg)
@@ -250,10 +245,6 @@ void task_wolfpack_callback(void *arg)
 		{
 			calibrate_count++;  		// Increment calibration counter
 		}
-		// Clear all speed references and ramping variables
-		LOG_w_m_RPM_ref_limited = 0;
-		LOG_w_m_RPM_ref = 0;
-		w_e_manual_limited = 0;
 	    LOG_v_dc_offset = (1.0-EXP_W_F_TS)*LOG_v_dc + LOG_v_dc_offset*EXP_W_F_TS;  // Low pass filter Voltage Sensor Input
 	    LOG_i_a_offset = (1.0-EXP_W_F_TS)*LOG_i_a + LOG_i_a_offset*EXP_W_F_TS;  // Low pass filter Current Sensor A Input
 	    LOG_i_b_offset = (1.0-EXP_W_F_TS)*LOG_i_b + LOG_i_b_offset*EXP_W_F_TS;  // Low pass filter Current Sensor B Input
@@ -268,8 +259,6 @@ void task_wolfpack_callback(void *arg)
 	case 1: // ************* IDLE ******************
 		LOG_pwm_state = pwm_disable(); 	// Ensure that PWMs are disabled
 		LOG_w_m_RPM_ref_limited = 0;	// Clear Volt/Hz limited reference
-		LOG_w_m_RPM_ref = 0;			// Clear Volt/Hz speed reference
-		w_e_manual_limited = 0;			// Clear manual mode limited frequency
 
 		if (LOG_protection_status)		// Transition to TRIPPED if protections are active.
 		{
@@ -331,16 +320,8 @@ void task_wolfpack_callback(void *arg)
 	{		// Inverter voltage commands come from Volts/Hz algorithm
 
 	    //*************** Insert Volts/Hertz Filtering Logic here... ****************
-		// Apply rate limiting
-		double max_delta = VOLTSPERHZ_RPM_PER_SEC * Ts;
-		LOG_w_m_RPM_ref_limited = rate_limit(LOG_w_m_RPM_ref, LOG_w_m_RPM_ref_limited, max_delta);
-
-		// Apply magnitude limit
-		if (LOG_w_m_RPM_ref_limited > VOLTSPERHZ_RPM_LIMIT) {
-		    LOG_w_m_RPM_ref_limited = VOLTSPERHZ_RPM_LIMIT;
-		} else if (LOG_w_m_RPM_ref_limited < -VOLTSPERHZ_RPM_LIMIT) {
-		    LOG_w_m_RPM_ref_limited = -VOLTSPERHZ_RPM_LIMIT;
-		}
+		// LOG_w_m_RPM_ref_limited = ???
+		LOG_w_m_RPM_ref_limited = LOG_w_m_RPM_ref;
 		w_e_V_per_Hz = POLE_PAIRS * RPM_TO_RAD_PER_SEC(LOG_w_m_RPM_ref_limited);  		// Convert V/Hz RPM command to we command [rad/s]
 		V_mag_V_per_Hz = w_e_V_per_Hz * PM_FLUX_V_SEC_PER_RAD + VOLT_PER_HZ_V_INITAL;	// Create V/Hz Voltage command from we command and estimate of flux [V]
 
@@ -349,19 +330,8 @@ void task_wolfpack_callback(void *arg)
 		}
 	else	// Inverter voltage commands come from "manual" variables sent from Python script
 		{
-		// Convert manual frequency to RPM equivalent for rate limiting
-		double w_e_manual_RPM_equiv = RAD_PER_SEC_TO_RPM(w_e_manual / POLE_PAIRS);
-		double w_e_manual_limited_RPM_equiv = RAD_PER_SEC_TO_RPM(w_e_manual_limited / POLE_PAIRS);
-
-		// Apply rate limiting in RPM
-		double max_delta_manual = VOLTSPERHZ_RPM_PER_SEC * Ts;
-		w_e_manual_limited_RPM_equiv = rate_limit(w_e_manual_RPM_equiv, w_e_manual_limited_RPM_equiv, max_delta_manual);
-
-		// Convert back to rad/s electrical
-		w_e_manual_limited = POLE_PAIRS * RPM_TO_RAD_PER_SEC(w_e_manual_limited_RPM_equiv);
-
 		LOG_V_mag_cmd = V_mag_manual;													// Assign Manual V command to inverter V command
-		LOG_w_e_cmd = w_e_manual_limited;												// Assign Manual we command (rate limited) to inverter we command
+		LOG_w_e_cmd = w_e_manual;														// Assign Manual we command to inverter we command
 		}
 
 	LOG_theta_e_cmd = theta_e_cmd_prev + LOG_w_e_cmd * Ts;		// Increment the theta e command
@@ -377,34 +347,12 @@ void task_wolfpack_callback(void *arg)
     LOG_m_cmd_b = 2*LOG_v_cmd_b/LOG_v_dc;						// Phase B modulation cmd from scaled Phase B voltage cmd
     LOG_m_cmd_c = 2*LOG_v_cmd_c/LOG_v_dc;						// Phase C modulation cmd from scaled Phase C voltage cmd
 
-    //*************** Insert space vector modulation calculations here... ****************
-    // SVPWM CODE START - ADD THIS CODE
-    // Find the maximum and minimum of the three phase modulation commands
-    double m_max = LOG_m_cmd_a;
-    double m_min = LOG_m_cmd_a;
+    //*************** SVPWM ****************
+    LOG_m_cmd_0 = -0.5*(fmax(LOG_m_cmd_a,fmax(LOG_m_cmd_b,LOG_m_cmd_c)) + fmin(LOG_m_cmd_a,fmin(LOG_m_cmd_b,LOG_m_cmd_c)));
 
-    if (LOG_m_cmd_b > m_max) {
-        m_max = LOG_m_cmd_b;
-    }
-    if (LOG_m_cmd_c > m_max) {
-        m_max = LOG_m_cmd_c;
-    }
-
-    if (LOG_m_cmd_b < m_min) {
-        m_min = LOG_m_cmd_b;
-    }
-    if (LOG_m_cmd_c < m_min) {
-        m_min = LOG_m_cmd_c;
-    }
-
-    // Calculate zero-sequence modulation to center the waveform
-    // This maximizes DC bus utilization and implements SVPWM
-    LOG_m_0 = -0.5 * (m_max + m_min);
-    // SVPWM CODE END
-
-    LOG_m_cmd_a = LOG_m_cmd_a + LOG_m_0;						// Phase A modulation command with any common mode m_0
-    LOG_m_cmd_b = LOG_m_cmd_b + LOG_m_0;						// Phase B modulation command with any common mode m_0
-    LOG_m_cmd_c = LOG_m_cmd_c + LOG_m_0;						// Phase C modulation command with any common mode m_0
+    LOG_m_cmd_a = LOG_m_cmd_a + LOG_m_cmd_0;						// Phase A modulation command with any common mode m_0
+    LOG_m_cmd_b = LOG_m_cmd_b + LOG_m_cmd_0;						// Phase B modulation command with any common mode m_0
+    LOG_m_cmd_c = LOG_m_cmd_c + LOG_m_cmd_0;						// Phase C modulation command with any common mode m_0
 
     LOG_m_cmd_ab = LOG_m_cmd_a - LOG_m_cmd_b;					// Line-to-Line AB modulation command
 
@@ -413,10 +361,20 @@ void task_wolfpack_callback(void *arg)
     LOG_duty_b = 0.5*(1 + LOG_m_cmd_b);								// Phase B duty ratio calculation
     LOG_duty_c = 0.5*(1 + LOG_m_cmd_c);								// Phase C duty ratio calculation
 
+    // Deadtime compensation: linearly interpolate sign(i) between +/-CURRENT_MAX_DT_COMP to avoid
+    // abrupt switching at zero crossing; saturates to +/-TD_PER_TS_COMP outside that band.
+    LOG_dtcomp_a = TD_PER_TS_COMP * fmax(-1.0, fmin(1.0, LOG_i_a / CURRENT_MAX_DT_COMP));
+    LOG_dtcomp_b = TD_PER_TS_COMP * fmax(-1.0, fmin(1.0, LOG_i_b / CURRENT_MAX_DT_COMP));
+    LOG_dtcomp_c = TD_PER_TS_COMP * fmax(-1.0, fmin(1.0, LOG_i_c / CURRENT_MAX_DT_COMP));
+
+    LOG_duty_w_comp_a = LOG_duty_a + LOG_dtcomp_a; 		// abc duty ratio commands with deadtime compensation
+    LOG_duty_w_comp_b = LOG_duty_b + LOG_dtcomp_b; 		// abc duty ratio commands with deadtime compensation
+    LOG_duty_w_comp_c = LOG_duty_c + LOG_dtcomp_c; 		// abc duty ratio commands with deadtime compensation
+
     // Update PWM peripheral in FPGA
-    pwm_set_duty(0, LOG_duty_a); 								// Set HB1 duty ratio (INV1, PWM1 and PWM2)
-    pwm_set_duty(1, LOG_duty_b); 								// Set HB2 duty ratio (INV1, PWM3 and PWM4)
-    pwm_set_duty(2, LOG_duty_c); 								// Set HB3 duty ratio (INV1, PWM5 and PWM6)
+    pwm_set_duty(0, LOG_duty_w_comp_a); 								// Set HB1 duty ratio (INV1, PWM1 and PWM2)
+    pwm_set_duty(1, LOG_duty_w_comp_b); 								// Set HB2 duty ratio (INV1, PWM3 and PWM4)
+    pwm_set_duty(2, LOG_duty_w_comp_c); 								// Set HB3 duty ratio (INV1, PWM5 and PWM6)
 
     // ***********  Prepare for next ISR ****************************
     theta_m_prev = LOG_theta_m;									// Assign present theta_m to theta_m_prev for use in the next ISR
