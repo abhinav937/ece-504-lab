@@ -19,13 +19,17 @@ static command_help_t cmd_help[] = {
     { "init", "Start task" },
     { "deinit", "Stop task" },
 	{ "sm_get_state", "Get current SM state, (0 = Idle, 1 = Calibrate, 2 = Running, 3 = Tripped" },
-	{ "sm_idle", "Request SM Idle, only acknowledged from Running" },
-	{ "sm_calibrate", "Request SM Calibrate, only acknowledged from Idle" },
-	{ "sm_run", "Request SM Run, only acknowledged from Idle" },
-	{ "sm_trip_clear", "Request SM Trip Clear, only acknowledged from Tripped" },
-    { "set_manual_we", "Set frequency of voltage output (rad/s)" },
-    { "set_manual_Vmag", "Set amplitude of voltage output (V)" },
-	{ "set_VperHz_RPM", "Set the speed for Volt/Hz mode (RPM)" },
+	{ "sm_idle", "Request SM Idle, only acknowledged from RUNNING" },
+	{ "sm_calibrate", "Request SM Calibrate, only acknowledged from IDLE" },
+	{ "sm_run", "Request SM Run, only acknowledged from IDLE" },
+	{ "sm_trip_clear", "Request SM Trip Clear, only acknowledged from TRIPPED" },
+    { "set_i_q_ref_manual", "Set q axis current manual ref [A]" },
+    { "set_i_d_ref_manual", "Set d axis current manual ref [A]" },
+    { "set_Ireg_w_GCF", "Set current regulator gain cross over freq (GCF) [rad/s]" },
+	{ "set_Ireg_w_cross_over", "Set current regulator PI cross over freq [rad/s]" },
+	{ "set_theta_e_offset", "Reference Frame offset angle [rad]" },
+
+
 };
 
 
@@ -94,29 +98,48 @@ int cmd_wolfpack(int argc, char **argv)
 		return CMD_SUCCESS;
 	}
 
-    if (argc == 3 && STREQ("set_manual_we", argv[1])) {
-        double w_e = strtod(argv[2], NULL);
-
-        if (task_wolfpack_set_manual_w_e(w_e) != SUCCESS) {
+    if (argc == 3 && STREQ("set_i_q_ref_manual", argv[1])) {
+        double i = strtod(argv[2], NULL);
+        if (task_wolfpack_set_i_q_ref_manual(i) != SUCCESS) {
             return CMD_FAILURE;
         }
         return CMD_SUCCESS;
     }
 
-    if (argc == 3 && STREQ("set_manual_Vmag", argv[1])) {
-        double Vmag = strtod(argv[2], NULL);
-
-        if (task_wolfpack_set_manual_V_mag(Vmag) != SUCCESS) {
+    if (argc == 3 && STREQ("set_i_d_ref_manual", argv[1])) {
+        double i = strtod(argv[2], NULL);
+        if (task_wolfpack_set_i_d_ref_manual(i) != SUCCESS) {
             return CMD_FAILURE;
         }
         return CMD_SUCCESS;
     }
 
-    if (argc == 3 && STREQ("set_VperHz_RPM", argv[1])) {
-        double speed_ref = strtod(argv[2], NULL);
-        task_wolfpack_set_Volt_per_Hz_speed(speed_ref);
+    if (argc == 3 && STREQ("set_Ireg_w_GCF", argv[1])) {
+        double w = strtod(argv[2], NULL);
+        if (task_wolfpack_Ireg_set_w_GCF(w) != SUCCESS) {
+            return CMD_FAILURE;
+        }
         return CMD_SUCCESS;
     }
+
+    if (argc == 3 && STREQ("set_Ireg_w_cross_over", argv[1])) {
+        double w = strtod(argv[2], NULL);
+        if (task_wolfpack_Ireg_set_w_PI_cross_over(w) != SUCCESS) {
+            return CMD_FAILURE;
+        }
+        return CMD_SUCCESS;
+    }
+
+    if (argc == 3 && STREQ("set_theta_e_offset", argv[1])) {
+        double theta = strtod(argv[2], NULL);
+        if (task_wolfpack_set_theta_e_offset(theta) != SUCCESS) {
+            return CMD_FAILURE;
+        }
+        return CMD_SUCCESS;
+    }
+
+
+
 
     return CMD_INVALID_ARGUMENTS;
 }

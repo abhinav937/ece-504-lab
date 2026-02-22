@@ -24,9 +24,9 @@
 #define THETA_M_OFFSET 1.0*(0)			// Offset angle added to raw encoder angle [rad]
 #define ENCODER_OFFSET (PIOVER2)		// Offset of AMDS encoder1 [rad/count]
 
-#define HV_SENSE_GAIN (0.016277)			// Gain of AMDS HV Sense, ch_1 [V/count]
+#define HV_SENSE_GAIN (0.0163)			// Gain of AMDS HV Sense, ch_1 [V/count]
 #define HV_SENSE_OFFSET_COUNTS (32768)	// HV Sense nominal offset [counts]
-#define CURRENT_SENSE_GAIN (0.002151) 	// Current sensor gain [A/count]
+#define CURRENT_SENSE_GAIN (0.002028) 	// Current sensor gain [A/count]
 #define CURRENT_SENSE_OFFSET_COUNTS (36572)//(28917)	// Current sensor nominal offset in counts
 
 #define CALIB_SAMPLES (10000)			// Number of control periods to sample analog sensors and perform filtered offset calc.
@@ -37,18 +37,14 @@
 #define POLE_PAIRS (4.0)					// Number of pole pairs
 #define POLE_PAIRS_INV (1/POLE_PAIRS)	// Inverse of number of pole pairs
 
-#define PM_FLUX_V_SEC_PER_RAD (0.04)		// Flux constant of PM in Volts per ELECTRICAL rad/s
-#define VOLT_PER_HZ_V_INITAL (1)		// Volts/Hz command at zero frequency [V] - optional
+#define PM_FLUX_V_SEC_PER_RAD (0.0383)		// Flux constant of PM in Volts per ELECTRICAL rad/s
 
-#define WOLFPACK_VOLTAGE_MAX (40)		// Over-voltage protection level for Wolfpack Inverter
-#define WOLFPACK_CURRENT_MAX (10)		// Over-current protection level for Wolfpack Inverter
+#define WOLFPACK_VOLTAGE_MAX (500)		// Over-voltage protection level for Wolfpack Inverter
+#define WOLFPACK_CURRENT_MAX (30)		// Over-current protection level for Wolfpack Inverter
 
-#define VOLTSPERHZ_RPM_PER_SEC (100)	// Volts/Hz command rate limit [RPM/sec]
-#define VOLTSPERHZ_RPM_LIMIT (1000)		// Volts/Hz absolute limit [RPM]
-#define ENABLE_VOLTSPERHZ (0)			// Set to 1 to enable Volts/Hz output [Boolean]
-
-#define CURRENT_MAX_DT_COMP (0.2)		// Phase current [A] at which dt comp is TD_PER_TS_COMP
-#define TD_PER_TS_COMP (0.004 - 0.002) 	// NOTE: the *ideal* comp for dt=400 ns is 0.004. The distortion seems better if 200 ns is removed (hence the 0.004 - 0.002).  And so-on for other dt values.
+#define L_DS_ESTIMATE (0.001)			// Stator d axis inductance estimate [H]
+#define L_QS_ESTIMATE (0.0016)			// Stator q axis inductance estimate [H]
+#define R_S_ESTIMATE (0.55)				// Stator resistance estimate [Ohms]
 
 const uint8_t amds_port = 1;
 int LOG_amds_valid = 0;					// Status of AMDS data
@@ -76,25 +72,6 @@ int LOG_OC_status_b = 0;				// Status of Phase B current relative to over-curren
 int LOG_OC_status_c = 0;				// Status of Phase C current relative to over-current trip level
 int LOG_protection_status = 0;			// Protection logic used to stop state machine if signals are out of expected bounds
 
-// ************ COMMANDs for rotor speed in Volts/Hz mode
-
-double LOG_w_m_RPM_ref_delta_per_sec = 0;
-double LOG_w_m_RPM_ref_max = 0;
-double LOG_w_m_RPM_ref_limited = 0;
-double LOG_w_m_RPM_ref = 0;
-
-double V_mag_V_per_Hz = 0;				// Volts/Hz voltage magnitude command [V]
-double w_e_V_per_Hz = 0;				// Volts/Hz voltage frequency command [rad/s]
-
-// ************ COMMANDS for manual voltage control mode
-
-double V_mag_manual = 1;				// Manual voltage magnitude command [V]
-double w_e_manual = PI2*2;				// Manual voltage frequency command [rad/s]
-
-double LOG_V_mag_cmd = 0;				// Manual or Volts/Hz - this signal used for open loop voltage command
-double LOG_w_e_cmd = 0;					// Manual or Volts/Hz - this signal used for open loop frequency command
-double LOG_theta_e_cmd = 0;				// Manual or Volts/Hz - this signal used for open loop angle, derived from frequency command
-double theta_e_cmd_prev = 0;			// Manual or Volts/Hz - this signal is angle from previous ISR period
 
 // ************* AC voltage inverter output variables and related modulation, duty commands
 
@@ -112,17 +89,10 @@ double LOG_duty_a = 0.5;				// abc duty ratio commands
 double LOG_duty_b = 0.5;
 double LOG_duty_c = 0.5;
 
-double LOG_dtcomp_a = 0;				// Deadtime compensation, Phase A
-double LOG_dtcomp_b = 0;				// Deadtime compensation, Phase B
-double LOG_dtcomp_c = 0;				// Deadtime compensation, Phase C
-
-double LOG_duty_w_comp_a = 0.5; 		// abc duty ratio commands with deadtime compensation
-double LOG_duty_w_comp_b = 0.5;
-double LOG_duty_w_comp_c = 0.5;
-
 // *************  Rotor angle, speed, and scaling, etc. variables *************
 double LOG_theta_m = 0;					// Rotor angle, mech [rad]
 double LOG_theta_e = 0;					// Rotor angle, elec [rad]
+double theta_e_offset = 0;				// Offset angle added to theta_e for reference frame [rad]
 
 double theta_m_prev = 0;   				// Rotor angle, mech, from last ISR [rad]
 double LOG_delta_theta_m = 0;			// Incremental rotor angle, mech [rad];
@@ -132,6 +102,8 @@ double LOG_w_m_RPM = 0;					// Rotor speed, mech [RPM]
 double LOG_w_m_RPM_filtered = 0;		// Rotor speed, mech, after digital filter [RPM]
 double LOG_w_m_filtered = 0;			// Rotor speed, mech, after digital filter [rad/s]
 double LOG_w_e_filtered = 0;			// Rotor speed, elec, after digital filter [rad/s]
+
+double LOG_theta_e_ref_frame = 0;		// Angle to be used in Park Transformations
 
 // Encoder and Analog Inputs AMDS raw counts from each channel (Card)
 uint32_t LOG_enc_pos_data = 0;			// Encoder counts
@@ -148,6 +120,46 @@ double LOG_i_b = 0;						// AMDS Phase B current [A]
 double LOG_i_c = 0;						// AMDS Phase C current [A]
 double LOG_i_a_offset = 0;				// Offset of AMDS Current A [A]
 double LOG_i_b_offset = 0;				// Offset of AMDS Current B [A]
+
+// *********  Array of abc, dq0 signals - put into arrays to pass to transform functions *****************
+double i_abc[3] = {0,0,0};				// abc current vectors (3 element long)
+double i_dq0[3] = {0,0,0};				// dq0 current vectors (3 element long)
+double v_cmd_abc[3] = {0,0,0};			// abc command vectors (3 element long)
+double v_cmd_dq0[3] = {0,0,0};			// dq0 command vectors (3 element long)
+
+double LOG_i_q = 0;						// Resulting qd0 currents for Logging
+double LOG_i_d = 0;
+double LOG_i_0 = 0;
+
+double LOG_i_q_ref_manual = 0;			// Manual input qd current references
+double LOG_i_d_ref_manual = 0;			// These are both reset in the IDLE state
+
+double LOG_i_q_Error = 0;				// Difference between respective current references and feedback currents
+double LOG_i_d_Error = 0;
+
+double LOG_i_q_Error_Integral = 0;  	// Integral error of q and d axis current references.
+double LOG_i_d_Error_Integral = 0;		// These are both reset in the IDLE state
+
+double LOG_v_cmd_q_BEMF = 0;			// Back EMF voltage in q-axis
+double LOG_v_cmd_q_Prop = 0;		// Kp * Error term in q-axis
+double LOG_v_cmd_q_Inte = 0;	// Ki * Integral of Error in q-axis
+double LOG_v_cmd_q = 0;					// Total voltage command in q-axis
+
+double LOG_v_cmd_d_BEMF = 0;			// Back EMF voltage in d-axis
+double LOG_v_cmd_d_Prop = 0;		// Kp * Error term in d-axis
+double LOG_v_cmd_d_Inte = 0;	// Ki * Integral of Error in d-axis
+double LOG_v_cmd_d = 0;					// Total voltage command in d-axis
+
+double LOG_v_cmd_0 = 0;					// Zero sequence voltage command
+
+double LOG_Ireg_Kpd = 0;
+double LOG_Ireg_Kpq = 0;
+double LOG_Ireg_Kid = 0;
+double LOG_Ireg_Kiq = 0;
+double LOG_Ireg_w_GCF = 0;				// Current regulator pole (Kp = w_GCF * L)
+double LOG_Ireg_w_PI_cross_over = 0;	// Current regulator pole (Ki = w_PI_crossover * Kp)
+
+int Ireg_Integrator_Enable = 0;
 
 // Metrics for tracking control loop execution, ADC sampling etc.
 double LOG_control_looptime = 0;
@@ -222,11 +234,20 @@ void task_wolfpack_callback(void *arg)
 	LOG_w_m_filtered = RPM_TO_RAD_PER_SEC(LOG_w_m_RPM_filtered);	// Filtered mechanical freq [rad/s]
 	LOG_w_e_filtered = POLE_PAIRS * LOG_w_m_filtered;				// Filtered electrical freq [rad/s]
 
-	// ******************* Read AMDC and Encoder sensors
-	LOG_v_dc = HV_SENSE_GAIN*((LOG_amds_ch_1_data*1.0) - HV_SENSE_OFFSET_COUNTS);  //  Voltage sense data
-    LOG_i_a = CURRENT_SENSE_GAIN*((LOG_amds_ch_2_data*1.0) - CURRENT_SENSE_OFFSET_COUNTS);   //  Current sense data, Phase A
-    LOG_i_b = CURRENT_SENSE_GAIN*((LOG_amds_ch_4_data*1.0) - CURRENT_SENSE_OFFSET_COUNTS);   //  Current sense data, Phase B
-    LOG_i_c = -(LOG_i_a + LOG_i_b);
+	// ******************* Read AMDC and Encoder sensors - NOW with updated offsets from Calibration state.
+	if(LOG_wolf_state != 0){   // If not in CALIBRATE state use the offset
+		LOG_v_dc = HV_SENSE_GAIN*((LOG_amds_ch_1_data*1.0) - HV_SENSE_OFFSET_COUNTS) - LOG_v_dc_offset;   			//  Voltage sense data
+		LOG_i_a = CURRENT_SENSE_GAIN*((LOG_amds_ch_2_data*1.0) - CURRENT_SENSE_OFFSET_COUNTS) - LOG_i_a_offset;   //  Current sense data, Phase A
+		LOG_i_b = CURRENT_SENSE_GAIN*((LOG_amds_ch_4_data*1.0) - CURRENT_SENSE_OFFSET_COUNTS) - LOG_i_b_offset;   //  Current sense data, Phase B
+		LOG_i_c = -(LOG_i_a + LOG_i_b);
+	}
+	else{						// If in CALIBRATE state DO NOT use the offset (or else it goofs the offset calc itself).
+		// ******************* Read AMDC and Encoder sensors
+		LOG_v_dc = HV_SENSE_GAIN*((LOG_amds_ch_1_data*1.0) - HV_SENSE_OFFSET_COUNTS);  //  Voltage sense data
+		LOG_i_a = CURRENT_SENSE_GAIN*((LOG_amds_ch_2_data*1.0) - CURRENT_SENSE_OFFSET_COUNTS);   //  Current sense data, Phase A
+		LOG_i_b = CURRENT_SENSE_GAIN*((LOG_amds_ch_4_data*1.0) - CURRENT_SENSE_OFFSET_COUNTS);   //  Current sense data, Phase B
+		LOG_i_c = -(LOG_i_a + LOG_i_b);
+	}
 
 	// ******************* Compare voltage and current measurements with protection limits, set protection status if necessary (cause State Machine to TRIP)
 	LOG_OV_status_dc = (fabs(LOG_v_dc) > WOLFPACK_VOLTAGE_MAX);
@@ -258,7 +279,11 @@ void task_wolfpack_callback(void *arg)
 
 	case 1: // ************* IDLE ******************
 		LOG_pwm_state = pwm_disable(); 	// Ensure that PWMs are disabled
-		LOG_w_m_RPM_ref_limited = 0;	// Clear Volt/Hz limited reference
+
+		LOG_i_q_Error_Integral = 0;		// Clear d and q current integrators
+		LOG_i_d_Error_Integral = 0;
+		LOG_i_d_ref_manual = 0;			// Clear manual d and q current commands
+		LOG_i_q_ref_manual = 0;
 
 		if (LOG_protection_status)		// Transition to TRIPPED if protections are active.
 		{
@@ -302,7 +327,7 @@ void task_wolfpack_callback(void *arg)
 		break;
 	}
 
-	// ****************** Cleanup Uncleared Commands
+	// ****************** Cleanup Uncleared Commands ****************
 	sm_request_trip_clear = 0;		// Clear Trip Clear request
 	sm_request_run = 0;				// Clear Run request
 	sm_request_idle = 0;			// Clear Idle request
@@ -310,36 +335,56 @@ void task_wolfpack_callback(void *arg)
 
 	// ******************* End of State Machine  ****************
 
-	// ******************* Read AMDC and Encoder sensors - NOW with updated offsets from Calibration state.
-	LOG_v_dc = HV_SENSE_GAIN*((LOG_amds_ch_1_data*1.0) - HV_SENSE_OFFSET_COUNTS) - LOG_v_dc_offset;   			//  Voltage sense data
-	LOG_i_a = CURRENT_SENSE_GAIN*((LOG_amds_ch_2_data*1.0) - CURRENT_SENSE_OFFSET_COUNTS) - LOG_i_a_offset;   //  Current sense data, Phase A
-	LOG_i_b = CURRENT_SENSE_GAIN*((LOG_amds_ch_4_data*1.0) - CURRENT_SENSE_OFFSET_COUNTS) - LOG_i_b_offset;   //  Current sense data, Phase B
-	LOG_i_c = -(LOG_i_a + LOG_i_b);
+	// ******************* Update any Control Parameters derived from Python commands ***************
+	LOG_Ireg_Kpd = 0;  	// <-- Insert your code here...
+	LOG_Ireg_Kpq = 0;	// <-- Insert your code here...
 
-	if (ENABLE_VOLTSPERHZ) 	// Select which function to use to determine output inverter commands
-	{		// Inverter voltage commands come from Volts/Hz algorithm
+	LOG_Ireg_Kid = 0;	// <-- Insert your code here...
+	LOG_Ireg_Kiq = 0;	// <-- Insert your code here...
 
-	    //*************** Insert Volts/Hertz Filtering Logic here... ****************
-		// LOG_w_m_RPM_ref_limited = ???
-		LOG_w_m_RPM_ref_limited = LOG_w_m_RPM_ref;
-		w_e_V_per_Hz = POLE_PAIRS * RPM_TO_RAD_PER_SEC(LOG_w_m_RPM_ref_limited);  		// Convert V/Hz RPM command to we command [rad/s]
-		V_mag_V_per_Hz = w_e_V_per_Hz * PM_FLUX_V_SEC_PER_RAD + VOLT_PER_HZ_V_INITAL;	// Create V/Hz Voltage command from we command and estimate of flux [V]
+	// ******************* Get ready to Clark + Park transform phase currents
+	i_abc[0] = LOG_i_a;											// Assign abc currents to 3 element array
+	i_abc[1] = LOG_i_b;
+	i_abc[2] = LOG_i_c;
 
-		LOG_V_mag_cmd = V_mag_V_per_Hz;													// Assign V/Hz V command to inverter V command
-		LOG_w_e_cmd = w_e_V_per_Hz;														// Assign V/Hz we command to inverter we command
-		}
-	else	// Inverter voltage commands come from "manual" variables sent from Python script
-		{
-		LOG_V_mag_cmd = V_mag_manual;													// Assign Manual V command to inverter V command
-		LOG_w_e_cmd = w_e_manual;														// Assign Manual we command to inverter we command
-		}
+	LOG_theta_e_ref_frame = LOG_theta_e + theta_e_offset;		// Use the encoder electrical angle as the Park transform angle
+	LOG_theta_e = fmod(LOG_theta_e_ref_frame + PI2, PI2);  		// Wrap theta_ref_frame to 0 to 2*PI;
 
-	LOG_theta_e_cmd = theta_e_cmd_prev + LOG_w_e_cmd * Ts;		// Increment the theta e command
-	LOG_theta_e_cmd = fmod(LOG_theta_e_cmd + PI2, PI2);			// Modulus the theta e command by 2*PI
+	transform_dqz(0,LOG_theta_e_ref_frame,i_abc,i_dq0);			// Stationary to dq0 synchronous frame transformation (Clarke + Park)
 
-	LOG_v_cmd_a = LOG_V_mag_cmd*cos(LOG_theta_e_cmd);			// Phase A voltage cmd = sinusoid with Mag and Freq
-	LOG_v_cmd_b = LOG_V_mag_cmd*cos(LOG_theta_e_cmd - PI2/3);	// Phase B voltage cmd = sinusoid with Mag and Freq
-	LOG_v_cmd_c = LOG_V_mag_cmd*cos(LOG_theta_e_cmd + PI2/3);	// Phase C voltage cmd = sinusoid with Mag and Freq
+	// i_dq0 now contains i_abc currents transformed into Park Frame.
+
+	LOG_i_d = i_dq0[0];											// Assign results of 3 element array individual current variables
+	LOG_i_q = i_dq0[1];
+	LOG_i_0 = i_dq0[2];
+
+	LOG_i_d_Error = LOG_i_d_ref_manual - LOG_i_d;				// d and q-axis current error, difference of reference and feedback.
+	LOG_i_q_Error = LOG_i_q_ref_manual - LOG_i_q;
+
+	LOG_i_d_Error_Integral = 0;		// <-- Insert your code here...	// d and q-axis running integral of the current error.
+	LOG_i_q_Error_Integral = 0;		// <-- Insert your code here...
+
+	LOG_v_cmd_d_BEMF = 0;			// <-- Insert your code here...// Basic PI current regulator - you can modify with your regulator
+	LOG_v_cmd_d_Prop = 0;			// <-- Insert your code here...
+	LOG_v_cmd_d_Inte = 0;			// <-- Insert your code here...
+	LOG_v_cmd_d = LOG_v_cmd_d_BEMF + LOG_v_cmd_d_Prop + LOG_v_cmd_d_Inte;
+
+	LOG_v_cmd_q_BEMF = 0;			// <-- Insert your code here...
+	LOG_v_cmd_q_Prop = 0;			// <-- Insert your code here...
+	LOG_v_cmd_q_Inte = 0; 			// <-- Insert your code here...
+	LOG_v_cmd_q = LOG_v_cmd_q_BEMF + LOG_v_cmd_q_Prop + LOG_v_cmd_q_Inte;
+
+	v_cmd_dq0[0] = LOG_v_cmd_d;									// Assign the individual d, q, 0 voltage commands to the vector elements.
+	v_cmd_dq0[1] = LOG_v_cmd_q;
+	v_cmd_dq0[2] = LOG_v_cmd_0;
+
+	// ********  dq0 to abc transform
+	transform_dqz_inverse(0, LOG_theta_e_ref_frame, v_cmd_abc, v_cmd_dq0);
+
+	LOG_v_cmd_a = v_cmd_abc[0];									// Extract array components to individual logging variables
+	LOG_v_cmd_b = v_cmd_abc[1];
+	LOG_v_cmd_c = v_cmd_abc[2];
+
 	LOG_v_cmd_ab = LOG_v_cmd_a - LOG_v_cmd_b;					// Line-to-Line AB voltage command
 
 	// Scale voltage command by Vdc/2 for sine PWM
@@ -361,24 +406,13 @@ void task_wolfpack_callback(void *arg)
     LOG_duty_b = 0.5*(1 + LOG_m_cmd_b);								// Phase B duty ratio calculation
     LOG_duty_c = 0.5*(1 + LOG_m_cmd_c);								// Phase C duty ratio calculation
 
-    // Deadtime compensation: linearly interpolate sign(i) between +/-CURRENT_MAX_DT_COMP to avoid
-    // abrupt switching at zero crossing; saturates to +/-TD_PER_TS_COMP outside that band.
-    LOG_dtcomp_a = TD_PER_TS_COMP * fmax(-1.0, fmin(1.0, LOG_i_a / CURRENT_MAX_DT_COMP));
-    LOG_dtcomp_b = TD_PER_TS_COMP * fmax(-1.0, fmin(1.0, LOG_i_b / CURRENT_MAX_DT_COMP));
-    LOG_dtcomp_c = TD_PER_TS_COMP * fmax(-1.0, fmin(1.0, LOG_i_c / CURRENT_MAX_DT_COMP));
-
-    LOG_duty_w_comp_a = LOG_duty_a + LOG_dtcomp_a; 		// abc duty ratio commands with deadtime compensation
-    LOG_duty_w_comp_b = LOG_duty_b + LOG_dtcomp_b; 		// abc duty ratio commands with deadtime compensation
-    LOG_duty_w_comp_c = LOG_duty_c + LOG_dtcomp_c; 		// abc duty ratio commands with deadtime compensation
-
     // Update PWM peripheral in FPGA
-    pwm_set_duty(0, LOG_duty_w_comp_a); 								// Set HB1 duty ratio (INV1, PWM1 and PWM2)
-    pwm_set_duty(1, LOG_duty_w_comp_b); 								// Set HB2 duty ratio (INV1, PWM3 and PWM4)
-    pwm_set_duty(2, LOG_duty_w_comp_c); 								// Set HB3 duty ratio (INV1, PWM5 and PWM6)
+    pwm_set_duty(0, LOG_duty_a); 								// Set HB1 duty ratio (INV1, PWM1 and PWM2)
+    pwm_set_duty(1, LOG_duty_b); 								// Set HB2 duty ratio (INV1, PWM3 and PWM4)
+    pwm_set_duty(2, LOG_duty_c); 								// Set HB3 duty ratio (INV1, PWM5 and PWM6)
 
     // ***********  Prepare for next ISR ****************************
     theta_m_prev = LOG_theta_m;									// Assign present theta_m to theta_m_prev for use in the next ISR
-    theta_e_cmd_prev = LOG_theta_e_cmd;							// Assign present theta_e_cmd to theta_e_prev for use in the next ISR
     wolf_state_prev = LOG_wolf_state;							// Assign present state to previous
 
     // Compute and log the run time for this task
@@ -416,22 +450,39 @@ int task_wolfpack_sm_get_state(void)
 	return LOG_wolf_state;
 }
 
-int task_wolfpack_set_manual_w_e(double w_e)
+
+int task_wolfpack_set_i_q_ref_manual(double i)
 {
-	w_e_manual = w_e;
+	LOG_i_q_ref_manual = i;
     return SUCCESS;
 }
 
-int task_wolfpack_set_manual_V_mag(double Vmag)
+int task_wolfpack_set_i_d_ref_manual(double i)
 {
-    V_mag_manual = Vmag;
+	LOG_i_d_ref_manual = i;
     return SUCCESS;
 }
 
-void task_wolfpack_set_Volt_per_Hz_speed(double speed_ref_RPM)
+int task_wolfpack_Ireg_set_w_GCF(double w)
 {
-	LOG_w_m_RPM_ref = speed_ref_RPM;
+	LOG_Ireg_w_GCF = w;
+    return SUCCESS;
 }
+
+int task_wolfpack_Ireg_set_w_PI_cross_over(double w)
+{
+	LOG_Ireg_w_PI_cross_over = w;
+    return SUCCESS;
+}
+
+int task_wolfpack_set_theta_e_offset(double theta)
+{
+	theta_e_offset = theta;
+    return SUCCESS;
+}
+
+
+
 
 void task_wolfpack_stats_print(void)
 {
