@@ -37,7 +37,7 @@
 #define POLE_PAIRS (4.0)					// Number of pole pairs
 #define POLE_PAIRS_INV (1/POLE_PAIRS)	// Inverse of number of pole pairs
 
-#define PM_FLUX_V_SEC_PER_RAD (0.0383)		// Flux constant of PM in Volts per ELECTRICAL rad/s
+#define PM_FLUX_V_SEC_PER_RAD (0.0383)//(0.0383)		// Flux constant of PM in Volts per ELECTRICAL rad/s
 
 #define WOLFPACK_VOLTAGE_MAX (500)		// Over-voltage protection level for Wolfpack Inverter
 #define WOLFPACK_CURRENT_MAX (30)		// Over-current protection level for Wolfpack Inverter
@@ -92,7 +92,7 @@ double LOG_duty_c = 0.5;
 // *************  Rotor angle, speed, and scaling, etc. variables *************
 double LOG_theta_m = 0;					// Rotor angle, mech [rad]
 double LOG_theta_e = 0;					// Rotor angle, elec [rad]
-double theta_e_offset = 0;				// Offset angle added to theta_e for reference frame [rad]
+double theta_e_offset = 2.07;				// Offset angle added to theta_e for reference frame [rad]
 
 double theta_m_prev = 0;   				// Rotor angle, mech, from last ISR [rad]
 double LOG_delta_theta_m = 0;			// Incremental rotor angle, mech [rad];
@@ -336,11 +336,12 @@ void task_wolfpack_callback(void *arg)
 	// ******************* End of State Machine  ****************
 
 	// ******************* Update any Control Parameters derived from Python commands ***************
-	LOG_Ireg_Kpd = 0;  	// <-- Insert your code here...
-	LOG_Ireg_Kpq = 0;	// <-- Insert your code here...
+	// Gain formulas: Kp = w_GCF * L,  Ki = w_PI_cross_over * Kp
+	LOG_Ireg_Kpd = LOG_Ireg_w_GCF * L_DS_ESTIMATE;
+	LOG_Ireg_Kpq = LOG_Ireg_w_GCF * L_QS_ESTIMATE;
 
-	LOG_Ireg_Kid = 0;	// <-- Insert your code here...
-	LOG_Ireg_Kiq = 0;	// <-- Insert your code here...
+	LOG_Ireg_Kid = LOG_Ireg_w_PI_cross_over * LOG_Ireg_Kpd;
+	LOG_Ireg_Kiq = LOG_Ireg_w_PI_cross_over * LOG_Ireg_Kpq;
 
 	// ******************* Get ready to Clark + Park transform phase currents
 	i_abc[0] = LOG_i_a;											// Assign abc currents to 3 element array
@@ -361,17 +362,23 @@ void task_wolfpack_callback(void *arg)
 	LOG_i_d_Error = LOG_i_d_ref_manual - LOG_i_d;				// d and q-axis current error, difference of reference and feedback.
 	LOG_i_q_Error = LOG_i_q_ref_manual - LOG_i_q;
 
-	LOG_i_d_Error_Integral = 0;		// <-- Insert your code here...	// d and q-axis running integral of the current error.
-	LOG_i_q_Error_Integral = 0;		// <-- Insert your code here...
+	// Backward Euler integrators IDLE reset already handled in state machine
+	LOG_i_d_Error_Integral = LOG_i_d_Error_Integral + LOG_i_d_Error * Ts;
+	LOG_i_q_Error_Integral = LOG_i_q_Error_Integral + LOG_i_q_Error * Ts;
 
-	LOG_v_cmd_d_BEMF = 0;			// <-- Insert your code here...// Basic PI current regulator - you can modify with your regulator
-	LOG_v_cmd_d_Prop = 0;			// <-- Insert your code here...
-	LOG_v_cmd_d_Inte = 0;			// <-- Insert your code here...
+	// BEMF
+	LOG_v_cmd_d_BEMF = 0;
+	LOG_v_cmd_q_BEMF = LOG_w_e_filtered * PM_FLUX_V_SEC_PER_RAD;
+
+	// Proportional terms
+	LOG_v_cmd_d_Prop = LOG_Ireg_Kpd * LOG_i_d_Error;
+	LOG_v_cmd_q_Prop = LOG_Ireg_Kpq * LOG_i_q_Error;
+
+	// Integral terms
+	LOG_v_cmd_d_Inte = LOG_Ireg_Kid * LOG_i_d_Error_Integral;
+	LOG_v_cmd_q_Inte = LOG_Ireg_Kiq * LOG_i_q_Error_Integral;
+
 	LOG_v_cmd_d = LOG_v_cmd_d_BEMF + LOG_v_cmd_d_Prop + LOG_v_cmd_d_Inte;
-
-	LOG_v_cmd_q_BEMF = 0;			// <-- Insert your code here...
-	LOG_v_cmd_q_Prop = 0;			// <-- Insert your code here...
-	LOG_v_cmd_q_Inte = 0; 			// <-- Insert your code here...
 	LOG_v_cmd_q = LOG_v_cmd_q_BEMF + LOG_v_cmd_q_Prop + LOG_v_cmd_q_Inte;
 
 	v_cmd_dq0[0] = LOG_v_cmd_d;									// Assign the individual d, q, 0 voltage commands to the vector elements.
