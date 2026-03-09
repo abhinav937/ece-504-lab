@@ -37,14 +37,28 @@
 #define POLE_PAIRS (4.0)					// Number of pole pairs
 #define POLE_PAIRS_INV (1/POLE_PAIRS)	// Inverse of number of pole pairs
 
-#define PM_FLUX_V_SEC_PER_RAD (0.0383)//(0.0383)		// Flux constant of PM in Volts per ELECTRICAL rad/s
+#define PM_FLUX_V_SEC_PER_RAD (0.0383)		// Flux constant of PM in Volts per ELECTRICAL rad/s
 
-#define WOLFPACK_VOLTAGE_MAX (500)		// Over-voltage protection level for Wolfpack Inverter
-#define WOLFPACK_CURRENT_MAX (30)		// Over-current protection level for Wolfpack Inverter
+#define WOLFPACK_VOLTAGE_MAX (70)		// Over-voltage protection level for Wolfpack Inverter
+#define WOLFPACK_CURRENT_MAX (12)		// Over-current protection level for Wolfpack Inverter
+#define	VECTOR_CURRENT_LIMIT (2)		// Current Vector Command Limit (Set to 8 for normal operation)
 
 #define L_DS_ESTIMATE (0.001)			// Stator d axis inductance estimate [H]
 #define L_QS_ESTIMATE (0.0016)			// Stator q axis inductance estimate [H]
 #define R_S_ESTIMATE (0.55)				// Stator resistance estimate [Ohms]
+
+#define IREG_W_GCF (1885)				//
+#define IREG_W_PI_CROSS_OVER (500)		//
+#define IREG_KPD (0.001 * IREG_W_GCF)
+#define IREG_KPQ (0.0016 * IREG_W_GCF)
+#define IREG_KID (IREG_W_PI_CROSS_OVER * IREG_KPD)
+#define IREG_KIQ (IREG_W_PI_CROSS_OVER * IREG_KPQ)
+
+// Prelab 5: Current Regulator Selection
+// Comment out to use Classical PI (no decoupling) - Test 2.0
+// Uncomment to use State Feedback Decoupling - Tests 2.1.1, 2.1.2
+//#define STATE_FEEDBACK_DECOUPLING
+
 
 const uint8_t amds_port = 1;
 int LOG_amds_valid = 0;					// Status of AMDS data
@@ -92,7 +106,7 @@ double LOG_duty_c = 0.5;
 // *************  Rotor angle, speed, and scaling, etc. variables *************
 double LOG_theta_m = 0;					// Rotor angle, mech [rad]
 double LOG_theta_e = 0;					// Rotor angle, elec [rad]
-double theta_e_offset = 2.07;				// Offset angle added to theta_e for reference frame [rad]
+double theta_e_offset = -1.047197;		// Offset angle added to theta_e for reference frame [rad]
 
 double theta_m_prev = 0;   				// Rotor angle, mech, from last ISR [rad]
 double LOG_delta_theta_m = 0;			// Incremental rotor angle, mech [rad];
@@ -131,8 +145,21 @@ double LOG_i_q = 0;						// Resulting qd0 currents for Logging
 double LOG_i_d = 0;
 double LOG_i_0 = 0;
 
+double LOG_torque_estimate = 0;			// Estimated torque
+
+double LOG_i_s_ref = 0;					// MTPA current magnitude reference
+
 double LOG_i_q_ref_manual = 0;			// Manual input qd current references
 double LOG_i_d_ref_manual = 0;			// These are both reset in the IDLE state
+
+double LOG_i_q_mtpa = 0;				// dq current references after vector limiting block
+double LOG_i_d_mtpa = 0;				//
+
+double LOG_i_q_ref = 0;					// dq total current references
+double LOG_i_d_ref = 0;					//
+
+double LOG_i_q_ref_limited = 0;			// dq current references after vector limiting block
+double LOG_i_d_ref_limited = 0;			//
 
 double LOG_i_q_Error = 0;				// Difference between respective current references and feedback currents
 double LOG_i_d_Error = 0;
@@ -151,15 +178,6 @@ double LOG_v_cmd_d_Inte = 0;	// Ki * Integral of Error in d-axis
 double LOG_v_cmd_d = 0;					// Total voltage command in d-axis
 
 double LOG_v_cmd_0 = 0;					// Zero sequence voltage command
-
-double LOG_Ireg_Kpd = 0;
-double LOG_Ireg_Kpq = 0;
-double LOG_Ireg_Kid = 0;
-double LOG_Ireg_Kiq = 0;
-double LOG_Ireg_w_GCF = 0;				// Current regulator pole (Kp = w_GCF * L)
-double LOG_Ireg_w_PI_cross_over = 0;	// Current regulator pole (Ki = w_PI_crossover * Kp)
-
-int Ireg_Integrator_Enable = 0;
 
 // Metrics for tracking control loop execution, ADC sampling etc.
 double LOG_control_looptime = 0;
@@ -284,6 +302,7 @@ void task_wolfpack_callback(void *arg)
 		LOG_i_d_Error_Integral = 0;
 		LOG_i_d_ref_manual = 0;			// Clear manual d and q current commands
 		LOG_i_q_ref_manual = 0;
+		LOG_i_s_ref = 0;
 
 		if (LOG_protection_status)		// Transition to TRIPPED if protections are active.
 		{
@@ -335,14 +354,6 @@ void task_wolfpack_callback(void *arg)
 
 	// ******************* End of State Machine  ****************
 
-	// ******************* Update any Control Parameters derived from Python commands ***************
-	// Gain formulas: Kp = w_GCF * L,  Ki = w_PI_cross_over * Kp
-	LOG_Ireg_Kpd = LOG_Ireg_w_GCF * L_DS_ESTIMATE;
-	LOG_Ireg_Kpq = LOG_Ireg_w_GCF * L_QS_ESTIMATE;
-
-	LOG_Ireg_Kid = LOG_Ireg_w_PI_cross_over * LOG_Ireg_Kpd;
-	LOG_Ireg_Kiq = LOG_Ireg_w_PI_cross_over * LOG_Ireg_Kpq;
-
 	// ******************* Get ready to Clark + Park transform phase currents
 	i_abc[0] = LOG_i_a;											// Assign abc currents to 3 element array
 	i_abc[1] = LOG_i_b;
@@ -359,26 +370,64 @@ void task_wolfpack_callback(void *arg)
 	LOG_i_q = i_dq0[1];
 	LOG_i_0 = i_dq0[2];
 
-	LOG_i_d_Error = LOG_i_d_ref_manual - LOG_i_d;				// d and q-axis current error, difference of reference and feedback.
-	LOG_i_q_Error = LOG_i_q_ref_manual - LOG_i_q;
+	// Prelab 4: Torque Estimate
+	// T_e = (3/2) * (poles/2) * [lambda_pm * i_q + i_q * i_d * (Ld - Lq)]
+	LOG_torque_estimate = 1.5 * POLE_PAIRS
+	        * (PM_FLUX_V_SEC_PER_RAD * LOG_i_q
+	           + LOG_i_q * LOG_i_d * (L_DS_ESTIMATE - L_QS_ESTIMATE));
 
-	// Backward Euler integrators IDLE reset already handled in state machine
-	LOG_i_d_Error_Integral = LOG_i_d_Error_Integral + LOG_i_d_Error * Ts;
-	LOG_i_q_Error_Integral = LOG_i_q_Error_Integral + LOG_i_q_Error * Ts;
+	// Prelab 6: Maximum Torque Per Ampere (MTPA)
+	// i_d_mtpa = (lambda_pm - sqrt(lambda_pm^2 + 8*(Lq-Ld)*is_ref^2)) / (4*(Lq-Ld))
+	// i_q_mtpa = sign(is_ref) * sqrt(is_ref^2 - i_d_mtpa^2)
+	double mtpa_radicand = PM_FLUX_V_SEC_PER_RAD * PM_FLUX_V_SEC_PER_RAD
+	        + 8.0 * (L_QS_ESTIMATE - L_DS_ESTIMATE) * LOG_i_s_ref * LOG_i_s_ref;
+	LOG_i_d_mtpa = (PM_FLUX_V_SEC_PER_RAD - sqrt(mtpa_radicand))
+	        / (4.0 * (L_QS_ESTIMATE - L_DS_ESTIMATE));
+	double iq_mtpa_radicand = LOG_i_s_ref * LOG_i_s_ref - LOG_i_d_mtpa * LOG_i_d_mtpa;
+	LOG_i_q_mtpa = (LOG_i_s_ref >= 0.0 ? 1.0 : -1.0) * sqrt(fmax(0.0, iq_mtpa_radicand));
 
-	// BEMF
+	// Prelab 7: Total d and q references = MTPA + manual inputs
+	LOG_i_d_ref = LOG_i_d_mtpa + LOG_i_d_ref_manual;
+	LOG_i_q_ref = LOG_i_q_mtpa + LOG_i_q_ref_manual;
+
+	// Prelab 3: Vector Command Limiter
+	// Scale both references so magnitude does not exceed VECTOR_CURRENT_LIMIT,
+	// preserving the angle (ratio) of the original command vector.
+	double i_ref_mag = sqrt(LOG_i_d_ref * LOG_i_d_ref + LOG_i_q_ref * LOG_i_q_ref);
+	if (i_ref_mag > VECTOR_CURRENT_LIMIT) {
+	    double scale = VECTOR_CURRENT_LIMIT / i_ref_mag;
+	    LOG_i_d_ref_limited = LOG_i_d_ref * scale;
+	    LOG_i_q_ref_limited = LOG_i_q_ref * scale;
+	} else {
+	    LOG_i_d_ref_limited = LOG_i_d_ref;
+	    LOG_i_q_ref_limited = LOG_i_q_ref;
+	}
+
+	LOG_i_d_Error = LOG_i_d_ref_limited - LOG_i_d;				// d and q-axis current error, difference of reference and feedback.
+	LOG_i_q_Error = LOG_i_q_ref_limited - LOG_i_q;
+
+	LOG_i_d_Error_Integral += LOG_i_d_Error * Ts;				// d and q-axis running integral of the current error.
+	LOG_i_q_Error_Integral += LOG_i_q_Error * Ts;
+
+#ifndef STATE_FEEDBACK_DECOUPLING
+	// Prelab 5: Classical PI regulator (Test 2.0) - no cross-coupling cancellation
 	LOG_v_cmd_d_BEMF = 0;
-	LOG_v_cmd_q_BEMF = LOG_w_e_filtered * PM_FLUX_V_SEC_PER_RAD;
-
-	// Proportional terms
-	LOG_v_cmd_d_Prop = LOG_Ireg_Kpd * LOG_i_d_Error;
-	LOG_v_cmd_q_Prop = LOG_Ireg_Kpq * LOG_i_q_Error;
-
-	// Integral terms
-	LOG_v_cmd_d_Inte = LOG_Ireg_Kid * LOG_i_d_Error_Integral;
-	LOG_v_cmd_q_Inte = LOG_Ireg_Kiq * LOG_i_q_Error_Integral;
-
+	LOG_v_cmd_q_BEMF = PM_FLUX_V_SEC_PER_RAD * LOG_w_e_filtered;
+#else
+	// Prelab 5: State Feedback Decoupling (Tests 2.1.1, 2.1.2)
+	// Adds cross-coupling cancellation terms:
+	//   v_d += -we * Lq_est * iq   (cancel d-axis cross coupling)
+	//   v_q += +we * Ld_est * id   (cancel q-axis cross coupling, in addition to BEMF)
+	LOG_v_cmd_d_BEMF = +LOG_w_e_filtered * L_QS_ESTIMATE * LOG_i_q;
+	LOG_v_cmd_q_BEMF = -PM_FLUX_V_SEC_PER_RAD * LOG_w_e_filtered
+	                   + LOG_w_e_filtered * L_DS_ESTIMATE * LOG_i_d;
+#endif
+	LOG_v_cmd_d_Prop = IREG_KPD * LOG_i_d_Error;
+	LOG_v_cmd_d_Inte = IREG_KID * LOG_i_d_Error_Integral;
 	LOG_v_cmd_d = LOG_v_cmd_d_BEMF + LOG_v_cmd_d_Prop + LOG_v_cmd_d_Inte;
+
+	LOG_v_cmd_q_Prop = IREG_KPQ * LOG_i_q_Error;
+	LOG_v_cmd_q_Inte = IREG_KIQ * LOG_i_q_Error_Integral;
 	LOG_v_cmd_q = LOG_v_cmd_q_BEMF + LOG_v_cmd_q_Prop + LOG_v_cmd_q_Inte;
 
 	v_cmd_dq0[0] = LOG_v_cmd_d;									// Assign the individual d, q, 0 voltage commands to the vector elements.
@@ -470,23 +519,13 @@ int task_wolfpack_set_i_d_ref_manual(double i)
     return SUCCESS;
 }
 
-int task_wolfpack_Ireg_set_w_GCF(double w)
+int task_wolfpack_set_i_s_ref(double i)
 {
-	LOG_Ireg_w_GCF = w;
+	LOG_i_s_ref = i;
     return SUCCESS;
 }
 
-int task_wolfpack_Ireg_set_w_PI_cross_over(double w)
-{
-	LOG_Ireg_w_PI_cross_over = w;
-    return SUCCESS;
-}
 
-int task_wolfpack_set_theta_e_offset(double theta)
-{
-	theta_e_offset = theta;
-    return SUCCESS;
-}
 
 
 
