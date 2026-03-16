@@ -23,8 +23,7 @@ int task_wolfpack_set_i_q_ref_manual(double i);
 int task_wolfpack_set_i_d_ref_manual(double i);
 int task_wolfpack_set_w_m_ref(double w);
 
-double compute_log_dt(double current);
-void task_controller_stats_print(void);
-void task_controller_stats_reset(void);
+void task_wolfpack_stats_print(void);
+void task_wolfpack_stats_reset(void);
 
 #endif // TASK_WOLFPACK_H

@@ -19,7 +19,7 @@ static command_entry_t cmd_entry;
 static command_help_t cmd_help[] = {
     { "init", "Start task" },
     { "deinit", "Stop task" },
-	{ "sm_get_state", "Get current SM state, (0 = Idle, 1 = Calibrate, 2 = Running, 3 = Tripped" },
+	{ "sm_get_state", "Get current SM state (0 = Calibrate, 1 = Idle, 2 = Running, 3 = Tripped)" },
 	{ "sm_idle", "Request SM Idle, only acknowledged from RUNNING" },
 	{ "sm_calibrate", "Request SM Calibrate, only acknowledged from IDLE" },
 	{ "sm_run", "Request SM Run, only acknowledged from IDLE" },

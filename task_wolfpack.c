@@ -68,6 +68,11 @@
 #define Kp_w_m            (J_ESTIMATE * SPEED_REG_W_GCF)   // Speed PI proportional gain [N*m*s/rad]
 #define Ki_w_m            (B_ESTIMATE * SPEED_REG_W_GCF)   // Speed PI integral gain [N*m/rad]
 
+// Lab 4-2: Field Weakening Regulator Parameters
+#define W_E_NOM_FW       (500.0)                                        // Nominal elec. speed for FW KI tuning [rad/s elec]
+#define FW_REG_KI        (SPEED_REG_W_GCF / (W_E_NOM_FW * L_DS_ESTIMATE)) // FW integrator gain [1/H]
+#define FW_DC_TO_AC_GAIN (0.95 / 1.73205080757)                         // k/sqrt(3): DC-to-AC voltage reference gain
+
 
 const uint8_t amds_port = 1;
 int LOG_amds_valid = 0;					// Status of AMDS data
@@ -133,6 +138,7 @@ uint32_t LOG_enc_pos_data = 0;			// Encoder counts
 uint32_t LOG_amds_ch_1_data = 0;		// DC Bus voltage, counts
 uint32_t LOG_amds_ch_2_data = 0;		// Current, Phase A, counts
 uint32_t LOG_amds_ch_4_data = 0;		// Current, Phase B, counts
+uint32_t LOG_amds_ch_6_data = 0;		// DC Bus current sensor, counts
 
 // ********* Analog Sense Variables and Offsets
 double LOG_v_dc = 0;					// HV Voltage Sense [V]
@@ -143,6 +149,21 @@ double LOG_i_b = 0;						// AMDS Phase B current [A]
 double LOG_i_c = 0;						// AMDS Phase C current [A]
 double LOG_i_a_offset = 0;				// Offset of AMDS Current A [A]
 double LOG_i_b_offset = 0;				// Offset of AMDS Current B [A]
+
+// Lab 4-2: DC Bus Current (AMDS channel 6)
+double LOG_i_dc = 0;					// DC bus current [A]
+double LOG_i_dc_offset = 0;				// DC bus current sensor offset [A]
+
+// Lab 4-2: Field Weakening Regulator variables
+double LOG_v_dq_mag_cmd = 0;			// Voltage magnitude reference (FW cmd) [V]
+double LOG_v_dq_mag = 0;				// Voltage magnitude from previous ISR cmd [V]
+double LOG_v_dq_mag_error_inte = 0;		// FW integrator state [V*s]
+double LOG_i_d_fw = 0;					// FW regulator d-axis current output [A]
+
+// Lab 4-2: Power estimates
+double LOG_p_dc = 0;					// DC input power [W]
+double LOG_p_ac = 0;					// AC stator power [W]
+double LOG_p_mech = 0;					// Mechanical shaft power [W]
 
 // *********  Array of abc, dq0 signals - put into arrays to pass to transform functions *****************
 double i_abc[3] = {0,0,0};				// abc current vectors (3 element long)
@@ -237,6 +258,7 @@ void task_wolfpack_callback(void *arg)
     amds_get_data(1, AMDS_CH_1, &LOG_amds_ch_1_data);	// HV Voltage Sensor
     amds_get_data(1, AMDS_CH_2, &LOG_amds_ch_2_data);	// Current Sensor, Phase A
     amds_get_data(1, AMDS_CH_4, &LOG_amds_ch_4_data);	// Current Sensor, Phase B
+    amds_get_data(1, AMDS_CH_6, &LOG_amds_ch_6_data);	// Current Sensor, DC Bus
     LOG_amds_valid = amds_check_data_validity(1);
 
 	// Convert encoder angle counts radians
@@ -274,6 +296,7 @@ void task_wolfpack_callback(void *arg)
 		LOG_i_a = CURRENT_SENSE_GAIN*((LOG_amds_ch_2_data*1.0) - CURRENT_SENSE_OFFSET_COUNTS) - LOG_i_a_offset;   //  Current sense data, Phase A
 		LOG_i_b = CURRENT_SENSE_GAIN*((LOG_amds_ch_4_data*1.0) - CURRENT_SENSE_OFFSET_COUNTS) - LOG_i_b_offset;   //  Current sense data, Phase B
 		LOG_i_c = -(LOG_i_a + LOG_i_b);
+		LOG_i_dc = CURRENT_SENSE_GAIN*((LOG_amds_ch_6_data*1.0) - CURRENT_SENSE_OFFSET_COUNTS) - LOG_i_dc_offset; //  DC bus current sense data
 	}
 	else{						// If in CALIBRATE state DO NOT use the offset (or else it goofs the offset calc itself).
 		// ******************* Read AMDC and Encoder sensors
@@ -281,6 +304,7 @@ void task_wolfpack_callback(void *arg)
 		LOG_i_a = CURRENT_SENSE_GAIN*((LOG_amds_ch_2_data*1.0) - CURRENT_SENSE_OFFSET_COUNTS);   //  Current sense data, Phase A
 		LOG_i_b = CURRENT_SENSE_GAIN*((LOG_amds_ch_4_data*1.0) - CURRENT_SENSE_OFFSET_COUNTS);   //  Current sense data, Phase B
 		LOG_i_c = -(LOG_i_a + LOG_i_b);
+		LOG_i_dc = CURRENT_SENSE_GAIN*((LOG_amds_ch_6_data*1.0) - CURRENT_SENSE_OFFSET_COUNTS);  //  DC bus current sense data (no offset)
 	}
 
 	// ******************* Compare voltage and current measurements with protection limits, set protection status if necessary (cause State Machine to TRIP)
@@ -303,6 +327,7 @@ void task_wolfpack_callback(void *arg)
 	    LOG_v_dc_offset = (1.0-EXP_W_F_TS)*LOG_v_dc + LOG_v_dc_offset*EXP_W_F_TS;  // Low pass filter Voltage Sensor Input
 	    LOG_i_a_offset = (1.0-EXP_W_F_TS)*LOG_i_a + LOG_i_a_offset*EXP_W_F_TS;  // Low pass filter Current Sensor A Input
 	    LOG_i_b_offset = (1.0-EXP_W_F_TS)*LOG_i_b + LOG_i_b_offset*EXP_W_F_TS;  // Low pass filter Current Sensor B Input
+	    LOG_i_dc_offset = (1.0-EXP_W_F_TS)*LOG_i_dc + LOG_i_dc_offset*EXP_W_F_TS;  // Low pass filter DC Bus Current Sensor
 
 		if (calibrate_count >= CALIB_SAMPLES)
 		{
@@ -322,6 +347,8 @@ void task_wolfpack_callback(void *arg)
 		LOG_T_e_cmd_prop = 0;
 		LOG_T_e_cmd_inte = 0;
 		LOG_T_e_cmd = 0;
+		LOG_v_dq_mag_error_inte = 0;	// Clear FW integrator state
+		LOG_i_d_fw = 0;					// Clear FW d-axis current output
 
 		if (LOG_protection_status)		// Transition to TRIPPED if protections are active.
 		{
@@ -418,21 +445,34 @@ void task_wolfpack_callback(void *arg)
 	double iq_mtpa_radicand = LOG_i_s_ref * LOG_i_s_ref - LOG_i_d_mtpa * LOG_i_d_mtpa;
 	LOG_i_q_mtpa = (LOG_i_s_ref >= 0.0 ? 1.0 : -1.0) * sqrt(fmax(0.0, iq_mtpa_radicand));
 
-	// Prelab 7: Total d and q references = MTPA + manual inputs
-	LOG_i_d_ref = LOG_i_d_mtpa + LOG_i_d_ref_manual;
+	// Lab 4-2 Prelab 3: Field Weakening Regulator
+	// Uses v_cmd_d, v_cmd_q from previous ISR (one-sample delay).
+	// Integrates the voltage magnitude error; clamps integrator state <= 0
+	// so i_d_fw is always <= 0 (negative d-axis current for flux weakening).
+	LOG_v_dq_mag     = sqrt(LOG_v_cmd_d * LOG_v_cmd_d + LOG_v_cmd_q * LOG_v_cmd_q);
+	LOG_v_dq_mag_cmd = FW_DC_TO_AC_GAIN * LOG_v_dc;
+	double fw_error  = LOG_v_dq_mag_cmd - LOG_v_dq_mag;   // x[k], allowed + or -
+	LOG_v_dq_mag_error_inte += Ts * fw_error;              // y[k] = y[k-1] + Ts*x[k]
+	if (LOG_v_dq_mag_error_inte > 0.0) {                   // Keep integrator state <= 0
+	    LOG_v_dq_mag_error_inte = 0.0;
+	}
+	LOG_i_d_fw = FW_REG_KI * LOG_v_dq_mag_error_inte;     // i_d_fw <= 0
+
+	// Lab 4-2 Prelab 3: Total d and q references
+	// i_d_ref = min(i_d_mtpa, i_d_fw) so FW pulls id more negative when active
+	LOG_i_d_ref = fmin(LOG_i_d_mtpa, LOG_i_d_fw) + LOG_i_d_ref_manual;
 	LOG_i_q_ref = LOG_i_q_mtpa + LOG_i_q_ref_manual;
 
-	// Prelab 3: Vector Command Limiter
-	// Scale both references so magnitude does not exceed VECTOR_CURRENT_LIMIT,
-	// preserving the angle (ratio) of the original command vector.
-	double i_ref_mag = sqrt(LOG_i_d_ref * LOG_i_d_ref + LOG_i_q_ref * LOG_i_q_ref);
-	if (i_ref_mag > VECTOR_CURRENT_LIMIT) {
-	    double scale = VECTOR_CURRENT_LIMIT / i_ref_mag;
-	    LOG_i_d_ref_limited = LOG_i_d_ref * scale;
-	    LOG_i_q_ref_limited = LOG_i_q_ref * scale;
-	} else {
-	    LOG_i_d_ref_limited = LOG_i_d_ref;
-	    LOG_i_q_ref_limited = LOG_i_q_ref;
+	// Lab 4-2 Prelab 4 (Optional): Vector Limiter with d-axis Priority
+	// d-axis (i_d_ref) is passed through first up to +/- VECTOR_CURRENT_LIMIT.
+	// Remaining current budget is allocated to i_q_ref.
+	{
+	    double id_clamped = fmax(-VECTOR_CURRENT_LIMIT, fmin(VECTOR_CURRENT_LIMIT, LOG_i_d_ref));
+	    double iq_budget  = sqrt(fmax(0.0, VECTOR_CURRENT_LIMIT * VECTOR_CURRENT_LIMIT
+	                                       - id_clamped * id_clamped));
+	    LOG_i_d_ref_limited = id_clamped;
+	    LOG_i_q_ref_limited = (LOG_i_q_ref >= 0.0 ? 1.0 : -1.0)
+	                          * fmin(fabs(LOG_i_q_ref), iq_budget);
 	}
 
 	LOG_i_d_Error = LOG_i_d_ref_limited - LOG_i_d;				// d and q-axis current error, difference of reference and feedback.
@@ -461,6 +501,11 @@ void task_wolfpack_callback(void *arg)
 	LOG_v_cmd_q_Prop = IREG_KPQ * LOG_i_q_Error;
 	LOG_v_cmd_q_Inte = IREG_KIQ * LOG_i_q_Error_Integral;
 	LOG_v_cmd_q = LOG_v_cmd_q_BEMF + LOG_v_cmd_q_Prop + LOG_v_cmd_q_Inte;
+
+	// Lab 4-2 Prelab 6: Power Estimates
+	LOG_p_dc   = LOG_v_dc * LOG_i_dc;
+	LOG_p_ac   = 1.5 * (LOG_v_cmd_q * LOG_i_q + LOG_v_cmd_d * LOG_i_d);
+	LOG_p_mech = LOG_torque_estimate * LOG_w_m_filtered;
 
 	v_cmd_dq0[0] = LOG_v_cmd_d;									// Assign the individual d, q, 0 voltage commands to the vector elements.
 	v_cmd_dq0[1] = LOG_v_cmd_q;
