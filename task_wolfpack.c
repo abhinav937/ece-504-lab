@@ -59,6 +59,15 @@
 // Uncomment to use State Feedback Decoupling - Tests 2.1.1, 2.1.2
 //#define STATE_FEEDBACK_DECOUPLING
 
+// Lab 4-1: Speed Regulator Parameters
+// Update J_ESTIMATE and B_ESTIMATE after measuring them in test 1.1.
+// Adjust SPEED_REG_W_GCF for each bandwidth trial (2*pi*1, 2*pi*pi, 2*pi*10).
+#define J_ESTIMATE        (0.0042668)                  // Rotational inertia estimate [kg*m^2]
+#define B_ESTIMATE        (0.0020483)                  // Rotational damping estimate [N*m*s/rad]
+#define SPEED_REG_W_GCF   (6.28318530718)        // Speed regulator gain crossover frequency [rad/s] (default: 2*pi*1 Hz)
+#define Kp_w_m            (J_ESTIMATE * SPEED_REG_W_GCF)   // Speed PI proportional gain [N*m*s/rad]
+#define Ki_w_m            (B_ESTIMATE * SPEED_REG_W_GCF)   // Speed PI integral gain [N*m/rad]
+
 
 const uint8_t amds_port = 1;
 int LOG_amds_valid = 0;					// Status of AMDS data
@@ -147,7 +156,14 @@ double LOG_i_0 = 0;
 
 double LOG_torque_estimate = 0;			// Estimated torque
 
-double LOG_i_s_ref = 0;					// MTPA current magnitude reference
+double LOG_i_s_ref = 0;					// MTPA current magnitude reference (computed from speed PI torque command)
+
+// Lab 4-1: Speed PI regulator variables
+double LOG_w_m_ref = 0;				// Rotor speed reference [rad/s]
+double LOG_T_e_cmd_prop = 0;			// Speed PI proportional torque command [N*m]
+double LOG_T_e_cmd_inte = 0;			// Speed PI integral torque command [N*m]
+double LOG_T_e_cmd = 0;				// Total speed PI torque command [N*m]
+double w_m_error = 0;					// Speed error (ref - actual) [rad/s]
 
 double LOG_i_q_ref_manual = 0;			// Manual input qd current references
 double LOG_i_d_ref_manual = 0;			// These are both reset in the IDLE state
@@ -302,7 +318,10 @@ void task_wolfpack_callback(void *arg)
 		LOG_i_d_Error_Integral = 0;
 		LOG_i_d_ref_manual = 0;			// Clear manual d and q current commands
 		LOG_i_q_ref_manual = 0;
-		LOG_i_s_ref = 0;
+		LOG_w_m_ref = 0;				// Clear speed reference and speed PI states
+		LOG_T_e_cmd_prop = 0;
+		LOG_T_e_cmd_inte = 0;
+		LOG_T_e_cmd = 0;
 
 		if (LOG_protection_status)		// Transition to TRIPPED if protections are active.
 		{
@@ -375,6 +394,19 @@ void task_wolfpack_callback(void *arg)
 	LOG_torque_estimate = 1.5 * POLE_PAIRS
 	        * (PM_FLUX_V_SEC_PER_RAD * LOG_i_q
 	           + LOG_i_q * LOG_i_d * (L_DS_ESTIMATE - L_QS_ESTIMATE));
+
+	// Lab 4-1 Prelab 4: Speed PI Regulator
+	// Computes torque command from speed error using proportional and integral terms.
+	// Kp_w_m = J_ESTIMATE * SPEED_REG_W_GCF, Ki_w_m = B_ESTIMATE * SPEED_REG_W_GCF.
+	// Set Kp_w_m = 0 and Ki_w_m = 0 (via J_ESTIMATE=B_ESTIMATE=0) for open-loop test 1.1.
+	w_m_error = LOG_w_m_ref - LOG_w_m_filtered;
+	LOG_T_e_cmd_prop = Kp_w_m * w_m_error;
+	LOG_T_e_cmd_inte += Ki_w_m * w_m_error * Ts;
+	LOG_T_e_cmd = LOG_T_e_cmd_prop + LOG_T_e_cmd_inte;
+
+	// Lab 4-1 Prelab 5: Compute i_s_ref from torque command for MTPA
+	// T_e = (3/2) * P * lambda_pm * i_s  =>  i_s_ref = T_e_cmd / (1.5 * P * lambda_pm)
+	LOG_i_s_ref = LOG_T_e_cmd / (1.5 * POLE_PAIRS * PM_FLUX_V_SEC_PER_RAD);
 
 	// Prelab 6: Maximum Torque Per Ampere (MTPA)
 	// i_d_mtpa = (lambda_pm - sqrt(lambda_pm^2 + 8*(Lq-Ld)*is_ref^2)) / (4*(Lq-Ld))
@@ -519,9 +551,9 @@ int task_wolfpack_set_i_d_ref_manual(double i)
     return SUCCESS;
 }
 
-int task_wolfpack_set_i_s_ref(double i)
+int task_wolfpack_set_w_m_ref(double w)
 {
-	LOG_i_s_ref = i;
+	LOG_w_m_ref = w;
     return SUCCESS;
 }
 

@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/abhin/Downloads/**)",
+      "Bash(python -c \":*)",
+      "Bash(pip install pypdf pdfplumber)"
+    ]
+  }
+}

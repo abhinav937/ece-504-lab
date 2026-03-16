@@ -13,6 +13,16 @@ int task_wolfpack_deinit(void);
 
 void task_wolfpack_callback(void *arg);
 
+void task_wolfpack_sm_run(void);
+void task_wolfpack_sm_idle(void);
+void task_wolfpack_sm_calibrate(void);
+void task_wolfpack_sm_trip_clear(void);
+int task_wolfpack_sm_get_state(void);
+
+int task_wolfpack_set_i_q_ref_manual(double i);
+int task_wolfpack_set_i_d_ref_manual(double i);
+int task_wolfpack_set_w_m_ref(double w);
+
 double compute_log_dt(double current);
 void task_controller_stats_print(void);
 void task_controller_stats_reset(void);
