@@ -674,7 +674,7 @@ void task_wolfpack_callback(void *arg)
 	// --- Estimator 1: Simplest — ignore current effects ---
 	LOG_e_alpha1     = V_alpha;
 	LOG_e_beta1      = V_beta;
-	LOG_theta_e_est1 = 3.14+atan2((LOG_e_beta1+LOG_e_alpha1*3.14/2), LOG_e_alpha1);
+	LOG_theta_e_est1 = 3.14+atan2(LOG_e_beta1, LOG_e_alpha1);
 
 	// --- Estimator 2: Nonzero current — add Rs drop and Ls cross-coupling ---
 	double w_e       = LOG_w_e_filtered;
