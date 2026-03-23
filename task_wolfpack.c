@@ -52,6 +52,8 @@
 #define L_DS_ESTIMATE       (0.001)                 // d-axis stator inductance estimate [H]
 #define L_QS_ESTIMATE       (0.0016)                // q-axis stator inductance estimate [H]
 #define R_S_ESTIMATE        (0.55)                  // Stator resistance estimate [Ohms]
+#define L_S_ESTIMATE        ((L_DS_ESTIMATE + L_QS_ESTIMATE) / 2.0) // Average stator inductance [H]
+#define K_SMO               (10.0)                  // SMO switching gain [V]
 
 // ============================================================================
 // PROTECTION LIMITS
@@ -65,8 +67,8 @@
 // CURRENT REGULATOR (IREG) PARAMETERS
 // ============================================================================
 
-#define IREG_W_GCF          (1885)                  // Current regulator gain crossover freq [rad/s]
-#define IREG_W_PI_CROSS_OVER (500)                  // Current PI crossover frequency [rad/s]
+#define IREG_W_GCF          (0)                  // Current regulator gain crossover freq [rad/s]
+#define IREG_W_PI_CROSS_OVER (0)                  // Current PI crossover frequency [rad/s]
 #define IREG_KPD            (0.001  * IREG_W_GCF)  // d-axis proportional gain
 #define IREG_KPQ            (0.0016 * IREG_W_GCF)  // q-axis proportional gain
 #define IREG_KID            (IREG_W_PI_CROSS_OVER * IREG_KPD)  // d-axis integral gain
@@ -80,7 +82,7 @@
 
 #define J_ESTIMATE          (0.0042668)             // Rotational inertia estimate [kg*m^2]
 #define B_ESTIMATE          (0.0020483)             // Rotational damping estimate [N*m*s/rad]
-#define SPEED_REG_W_GCF     (6.28318530718)         // Speed regulator GCF [rad/s] (default: 2*pi*1)
+#define SPEED_REG_W_GCF     (0)         // Speed regulator GCF [rad/s] (default: 2*pi*1)
 #define Kp_w_m              (J_ESTIMATE * SPEED_REG_W_GCF)  // Speed PI proportional gain [N*m*s/rad]
 #define Ki_w_m              (B_ESTIMATE * SPEED_REG_W_GCF)  // Speed PI integral gain [N*m/rad]
 
@@ -106,6 +108,8 @@ double LOG_control_looptime  = 0;       // ISR period [us]
 double LOG_control_runtime   = 0;       // ISR execution time [us]
 static uint32_t last_now_start = 0;
 static task_control_block_t tcb;        // Scheduler task control block
+static double i_alpha_hat = 0.0;        // SMO estimated alpha-axis current [A]
+static double i_beta_hat  = 0.0;        // SMO estimated beta-axis current [A]
 
 // ============================================================================
 // FEATURE ENABLE FLAGS  (1 = enabled, 0 = bypassed)
@@ -293,6 +297,32 @@ double LOG_duty_b   = 0.5;          // Phase B duty ratio [0, 1]
 double LOG_duty_c   = 0.5;          // Phase C duty ratio [0, 1]
 
 // ============================================================================
+// SENSORLESS ANGLE ESTIMATORS (Lab 5-1 Prelab)
+// ============================================================================
+
+// Estimator 1: Simplest (voltage only, no current correction)
+double LOG_e_alpha1         = 0;    // Alpha-axis back-EMF estimate 1 [V]
+double LOG_e_beta1          = 0;    // Beta-axis back-EMF estimate 1 [V]
+double LOG_theta_e_est1     = 0;    // Estimated electrical angle 1 [rad]
+
+// Estimator 2: Nonzero current (voltage + Rs/Ls correction)
+double LOG_e_alpha2         = 0;    // Alpha-axis back-EMF estimate 2 [V]
+double LOG_e_beta2          = 0;    // Beta-axis back-EMF estimate 2 [V]
+double LOG_theta_e_est2     = 0;    // Estimated electrical angle 2 [rad]
+
+// Estimator 3: Sliding Mode Observer (K*sign instead of sigmoid)
+double LOG_e_alpha3         = 0;    // Alpha-axis back-EMF estimate 3 (SMO output) [V]
+double LOG_e_beta3          = 0;    // Beta-axis back-EMF estimate 3 (SMO output) [V]
+double LOG_i_alpha_hat      = 0;    // SMO alpha-axis current estimate [A]
+double LOG_i_beta_hat       = 0;    // SMO beta-axis current estimate [A]
+double LOG_theta_e_est3     = 0;    // Estimated electrical angle 3 [rad]
+
+// Angle errors vs encoder reference
+double LOG_delta_theta_e_est1 = 0;  // Angle error: est1 - encoder [rad]
+double LOG_delta_theta_e_est2 = 0;  // Angle error: est2 - encoder [rad]
+double LOG_delta_theta_e_est3 = 0;  // Angle error: est3 - encoder [rad]
+
+// ============================================================================
 // TASK INIT / DEINIT
 // ============================================================================
 
@@ -384,6 +414,8 @@ void task_wolfpack_callback(void *arg)
 	{
 	case 0: // CALIBRATE — PWM off, accumulate sensor offsets via LPF
 		LOG_pwm_state = pwm_disable();
+		i_alpha_hat = 0.0;
+		i_beta_hat  = 0.0;
 		if (!calibrate_status) {
 			calibrate_count++;
 		}
@@ -399,6 +431,8 @@ void task_wolfpack_callback(void *arg)
 
 	case 1: // IDLE — PWM off, all integrators and commands cleared
 		LOG_pwm_state = pwm_disable();
+		i_alpha_hat = 0.0;
+		i_beta_hat  = 0.0;
 		LOG_i_q_Error_Integral   = 0;
 		LOG_i_d_Error_Integral   = 0;
 		LOG_i_d_ref_manual       = 0;
@@ -619,6 +653,54 @@ void task_wolfpack_callback(void *arg)
 	LOG_v_cmd_b  = v_cmd_abc[1];
 	LOG_v_cmd_c  = v_cmd_abc[2];
 	LOG_v_cmd_ab = LOG_v_cmd_a - LOG_v_cmd_b;
+
+	// ========================================================================
+	// SENSORLESS ANGLE ESTIMATORS (Lab 5-1 Prelab)
+	// ========================================================================
+
+	// Clarke transform of voltage commands: [v_cmd_a, v_cmd_b, v_cmd_c] → [V_α, V_β]
+	double v_cmd_abc_est[3]  = { LOG_v_cmd_a, LOG_v_cmd_b, LOG_v_cmd_c };
+	double v_alphabeta[3]    = { 0, 0, 0 };
+	transform_clarke(0, v_cmd_abc_est, v_alphabeta);
+	double V_alpha = v_alphabeta[0];
+	double V_beta  = v_alphabeta[1];
+
+	// Clarke transform of measured currents: i_abc already set above
+	double i_alphabeta[3] = { 0, 0, 0 };
+	transform_clarke(0, i_abc, i_alphabeta);
+	double i_alpha = i_alphabeta[0];
+	double i_beta  = i_alphabeta[1];
+
+	// --- Estimator 1: Simplest — ignore current effects ---
+	LOG_e_alpha1     = V_alpha;
+	LOG_e_beta1      = V_beta;
+	LOG_theta_e_est1 = 3.14+atan2((LOG_e_beta1+LOG_e_alpha1*3.14/2), LOG_e_alpha1);
+
+	// --- Estimator 2: Nonzero current — add Rs drop and Ls cross-coupling ---
+	double w_e       = LOG_w_e_filtered;
+	LOG_e_alpha2     = V_alpha - R_S_ESTIMATE * i_alpha + w_e * L_S_ESTIMATE * i_beta;
+	LOG_e_beta2      = V_beta  - R_S_ESTIMATE * i_beta  - w_e * L_S_ESTIMATE * i_alpha;
+	LOG_theta_e_est2 = 3.14+atan2(LOG_e_beta2, LOG_e_alpha2);
+
+	// --- Estimator 3: Sliding Mode Observer with K*sign(delta_i) ---
+	double delta_i_alpha = i_alpha_hat - i_alpha;
+	double delta_i_beta  = i_beta_hat  - i_beta;
+
+	LOG_e_alpha3 = K_SMO * ((delta_i_alpha >= 0) ? 1.0 : -1.0);
+	LOG_e_beta3  = K_SMO * ((delta_i_beta  >= 0) ? 1.0 : -1.0);
+
+	// Euler-integrate the current observer state
+	i_alpha_hat += Ts / L_S_ESTIMATE * (V_alpha - R_S_ESTIMATE * i_alpha_hat - LOG_e_alpha3);
+	i_beta_hat  += Ts / L_S_ESTIMATE * (V_beta  - R_S_ESTIMATE * i_beta_hat  - LOG_e_beta3);
+
+	LOG_i_alpha_hat  = i_alpha_hat;
+	LOG_i_beta_hat   = i_beta_hat;
+	LOG_theta_e_est3 = 3.14+atan2(LOG_e_beta3, LOG_e_alpha3);
+
+	// --- Angle errors vs encoder reference ---
+	LOG_delta_theta_e_est1 = LOG_theta_e_est1 - LOG_theta_e;
+	LOG_delta_theta_e_est2 = LOG_theta_e_est2 - LOG_theta_e;
+	LOG_delta_theta_e_est3 = LOG_theta_e_est3 - LOG_theta_e;
 
 	// ========================================================================
 	// SVPWM MODULATION
