@@ -23,6 +23,13 @@ int task_wolfpack_set_i_q_ref_manual(double i);
 int task_wolfpack_set_i_d_ref_manual(double i);
 int task_wolfpack_set_w_m_ref(double w);
 
+int task_wolfpack_set_en_speed_loop(int v);
+int task_wolfpack_set_en_mtpa(int v);
+int task_wolfpack_set_en_fw(int v);
+int task_wolfpack_set_en_state_fb(int v);
+int task_wolfpack_set_en_current_loop(int v);
+int task_wolfpack_set_en_vector_limit(int v);
+
 void task_wolfpack_stats_print(void);
 void task_wolfpack_stats_reset(void);
 
