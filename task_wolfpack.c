@@ -23,7 +23,7 @@
 #define ENCODER_COUNTS       (20000.0)              // Encoder counts per mechanical revolution
 #define ENCODER_COUNTS_INV   (1.0 * (1/ENCODER_COUNTS)) // Inverse of encoder counts per rev
 #define THETA_M_OFFSET       (1.0 * (0))            // Offset added to raw encoder angle [rad]
-#define ENCODER_OFFSET       (PIOVER2)              // AMDS encoder1 offset [rad/count]
+#define ENCODER_OFFSET       (PI / 2.0)             // AMDS encoder1 offset [rad/count]
 
 // ============================================================================
 // SENSOR SCALING PARAMETERS
@@ -321,6 +321,15 @@ double LOG_theta_e_est3     = 0;    // Estimated electrical angle 3 [rad]
 double LOG_delta_theta_e_est1 = 0;  // Angle error: est1 - encoder [rad]
 double LOG_delta_theta_e_est2 = 0;  // Angle error: est2 - encoder [rad]
 double LOG_delta_theta_e_est3 = 0;  // Angle error: est3 - encoder [rad]
+
+// ============================================================================
+// SENSORLESS PHASE CORRECTION (added for Lab 5-1)
+// Encoder angle leads the back-EMF-based estimates by exactly +90 electrical degrees.
+// We therefore add PIOVER2 to all three estimators so LOG_theta_e_est* now
+// matches the encoder reference (LOG_theta_e). This is mathematically clean,
+// works at any speed, and requires no buffers or variable delays.
+// ============================================================================
+#define THETA_EST_OFFSET (PI / 2.0)
 
 // ============================================================================
 // TASK INIT / DEINIT
@@ -674,13 +683,13 @@ void task_wolfpack_callback(void *arg)
 	// --- Estimator 1: Simplest — ignore current effects ---
 	LOG_e_alpha1     = V_alpha;
 	LOG_e_beta1      = V_beta;
-	LOG_theta_e_est1 = 3.14+atan2(LOG_e_beta1, LOG_e_alpha1);
+	LOG_theta_e_est1 = fmod(3.14 + atan2(LOG_e_beta1, LOG_e_alpha1) + THETA_EST_OFFSET + PI2, PI2);
 
 	// --- Estimator 2: Nonzero current — add Rs drop and Ls cross-coupling ---
 	double w_e       = LOG_w_e_filtered;
 	LOG_e_alpha2     = V_alpha - R_S_ESTIMATE * i_alpha + w_e * L_S_ESTIMATE * i_beta;
 	LOG_e_beta2      = V_beta  - R_S_ESTIMATE * i_beta  - w_e * L_S_ESTIMATE * i_alpha;
-	LOG_theta_e_est2 = 3.14+atan2(LOG_e_beta2, LOG_e_alpha2);
+	LOG_theta_e_est2 = fmod(3.14 + atan2(LOG_e_beta2, LOG_e_alpha2) + THETA_EST_OFFSET + PI2, PI2);
 
 	// --- Estimator 3: Sliding Mode Observer with K*sign(delta_i) ---
 	double delta_i_alpha = i_alpha_hat - i_alpha;
@@ -695,7 +704,7 @@ void task_wolfpack_callback(void *arg)
 
 	LOG_i_alpha_hat  = i_alpha_hat;
 	LOG_i_beta_hat   = i_beta_hat;
-	LOG_theta_e_est3 = 3.14+atan2(LOG_e_beta3, LOG_e_alpha3);
+	LOG_theta_e_est3 = fmod(3.14 + atan2(LOG_e_beta3, LOG_e_alpha3) + THETA_EST_OFFSET + PI2, PI2);
 
 	// --- Angle errors vs encoder reference ---
 	LOG_delta_theta_e_est1 = LOG_theta_e_est1 - LOG_theta_e;
