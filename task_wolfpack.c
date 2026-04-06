@@ -54,6 +54,7 @@
 #define R_S_ESTIMATE        (0.55)                  // Stator resistance estimate [Ohms]
 #define L_S_ESTIMATE        ((L_DS_ESTIMATE + L_QS_ESTIMATE) / 2.0) // Average stator inductance [H]
 #define K_SMO               (10.0)                  // SMO switching gain [V]
+#define a_SMO               (2.0)
 
 // ============================================================================
 // PROTECTION LIMITS
@@ -691,19 +692,23 @@ void task_wolfpack_callback(void *arg)
 	LOG_e_beta2      = V_beta  - R_S_ESTIMATE * i_beta  - w_e * L_S_ESTIMATE * i_alpha;
 	LOG_theta_e_est2 = fmod(3.14 + atan2(LOG_e_beta2, LOG_e_alpha2) + THETA_EST_OFFSET + PI2, PI2);
 
+
+//	LOG_e_alpha3 = K_SMO * ((delta_i_alpha >= 0) ? 1.0 : -1.0);
+//	LOG_e_beta3  = K_SMO * ((delta_i_beta  >= 0) ? 1.0 : -1.0);
+
 	// --- Estimator 3: Sliding Mode Observer with K*sign(delta_i) ---
 	double delta_i_alpha = i_alpha_hat - i_alpha;
 	double delta_i_beta  = i_beta_hat  - i_beta;
 
-	LOG_e_alpha3 = K_SMO * ((delta_i_alpha >= 0) ? 1.0 : -1.0);
-	LOG_e_beta3  = K_SMO * ((delta_i_beta  >= 0) ? 1.0 : -1.0);
+	// Inline sigmoid to completely avoid any function-name conflict
+	LOG_e_alpha3 = K_SMO * ((2.0 / (1.0 + exp(-a_SMO * delta_i_alpha))) - 1.0);
+	LOG_e_beta3  = K_SMO * ((2.0 / (1.0 + exp(-a_SMO * delta_i_beta)))  - 1.0);
 
 	// Euler-integrate the current observer state
 	i_alpha_hat += Ts / L_S_ESTIMATE * (V_alpha - R_S_ESTIMATE * i_alpha_hat - LOG_e_alpha3);
 	i_beta_hat  += Ts / L_S_ESTIMATE * (V_beta  - R_S_ESTIMATE * i_beta_hat  - LOG_e_beta3);
-
-	LOG_i_alpha_hat  = i_alpha_hat;
-	LOG_i_beta_hat   = i_beta_hat;
+	LOG_i_alpha_hat = i_alpha_hat;
+	LOG_i_beta_hat  = i_beta_hat;
 	LOG_theta_e_est3 = fmod(3.14 + atan2(LOG_e_beta3, LOG_e_alpha3) + THETA_EST_OFFSET + PI2, PI2);
 
 	// --- Angle errors vs encoder reference ---
@@ -763,6 +768,7 @@ void task_wolfpack_sm_calibrate(void)
 	sm_request_calibrate = 1;
 	calibrate_status     = 0;
 }
+
 
 int task_wolfpack_sm_get_state(void)
 {
