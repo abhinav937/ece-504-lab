@@ -55,6 +55,7 @@
 #define L_S_ESTIMATE        ((L_DS_ESTIMATE + L_QS_ESTIMATE) / 2.0) // Average stator inductance [H]
 #define K_SMO               (10.0)                  // SMO switching gain [V]
 #define a_SMO               (2.0)
+#define L_OBSERVER          (200.0)   // observer gain l [1/s] - tune this (100-500 typical)
 
 // ============================================================================
 // PROTECTION LIMITS
@@ -322,6 +323,11 @@ double LOG_theta_e_est3     = 0;    // Estimated electrical angle 3 [rad]
 double LOG_delta_theta_e_est1 = 0;  // Angle error: est1 - encoder [rad]
 double LOG_delta_theta_e_est2 = 0;  // Angle error: est2 - encoder [rad]
 double LOG_delta_theta_e_est3 = 0;  // Angle error: est3 - encoder [rad]
+
+// add these three lines right after: static double i_beta_hat = 0.0;
+static double e_alpha_hat = 0.0;   // estimated back-EMF alpha
+static double e_beta_hat  = 0.0;   // estimated back-EMF beta
+static double omega_r_hat = 0.0;   // estimated electrical speed
 
 // ============================================================================
 // SENSORLESS PHASE CORRECTION (added for Lab 5-1)
@@ -692,24 +698,35 @@ void task_wolfpack_callback(void *arg)
 	LOG_e_beta2      = V_beta  - R_S_ESTIMATE * i_beta  - w_e * L_S_ESTIMATE * i_alpha;
 	LOG_theta_e_est2 = fmod(3.14 + atan2(LOG_e_beta2, LOG_e_alpha2) + THETA_EST_OFFSET + PI2, PI2);
 
-
-//	LOG_e_alpha3 = K_SMO * ((delta_i_alpha >= 0) ? 1.0 : -1.0);
-//	LOG_e_beta3  = K_SMO * ((delta_i_beta  >= 0) ? 1.0 : -1.0);
-
-	// --- Estimator 3: Sliding Mode Observer with K*sign(delta_i) ---
+	// --- Estimator 3: New Back-EMF Observer (prelab eq 13) ---
 	double delta_i_alpha = i_alpha_hat - i_alpha;
 	double delta_i_beta  = i_beta_hat  - i_beta;
 
-	// Inline sigmoid to completely avoid any function-name conflict
-	LOG_e_alpha3 = K_SMO * ((2.0 / (1.0 + exp(-a_SMO * delta_i_alpha))) - 1.0);
-	LOG_e_beta3  = K_SMO * ((2.0 / (1.0 + exp(-a_SMO * delta_i_beta)))  - 1.0);
+	// raw back-EMF from sliding-mode current observer
+	double e_alpha_raw = K_SMO * ((2.0 / (1.0 + exp(-a_SMO * delta_i_alpha))) - 1.0);
+	double e_beta_raw  = K_SMO * ((2.0 / (1.0 + exp(-a_SMO * delta_i_beta)))  - 1.0);
 
-	// Euler-integrate the current observer state
-	i_alpha_hat += Ts / L_S_ESTIMATE * (V_alpha - R_S_ESTIMATE * i_alpha_hat - LOG_e_alpha3);
-	i_beta_hat  += Ts / L_S_ESTIMATE * (V_beta  - R_S_ESTIMATE * i_beta_hat  - LOG_e_beta3);
+	LOG_e_alpha3 = e_alpha_raw;
+	LOG_e_beta3  = e_beta_raw;
+
+	// New Back-EMF observer
+	double e_alpha_err = e_alpha_hat - e_alpha_raw;
+	double e_beta_err  = e_beta_hat  - e_beta_raw;
+
+	e_alpha_hat += Ts * (-omega_r_hat * e_beta_hat - L_OBSERVER * e_alpha_err);
+	e_beta_hat  += Ts * ( omega_r_hat * e_alpha_hat - L_OBSERVER * e_beta_err);
+
+	omega_r_hat += Ts * (e_alpha_err * e_beta_hat - e_beta_err * e_alpha_hat);
+
+	// current observer (unchanged)
+	i_alpha_hat += Ts / L_S_ESTIMATE * (V_alpha - R_S_ESTIMATE * i_alpha_hat - e_alpha_raw);
+	i_beta_hat  += Ts / L_S_ESTIMATE * (V_beta  - R_S_ESTIMATE * i_beta_hat  - e_beta_raw);
+
 	LOG_i_alpha_hat = i_alpha_hat;
 	LOG_i_beta_hat  = i_beta_hat;
-	LOG_theta_e_est3 = fmod(3.14 + atan2(LOG_e_beta3, LOG_e_alpha3) + THETA_EST_OFFSET + PI2, PI2);
+
+	// use the filtered back-EMF for angle (with phase correction)
+	LOG_theta_e_est3 = fmod(3.14 + atan2(e_beta_hat, e_alpha_hat) + THETA_EST_OFFSET + PI2, PI2);
 
 	// --- Angle errors vs encoder reference ---
 	LOG_delta_theta_e_est1 = LOG_theta_e_est1 - LOG_theta_e;
