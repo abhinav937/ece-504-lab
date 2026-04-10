@@ -54,11 +54,6 @@
 #define IREG_KID (IREG_W_PI_CROSS_OVER * IREG_KPD)
 #define IREG_KIQ (IREG_W_PI_CROSS_OVER * IREG_KPQ)
 
-// Prelab 5: Current Regulator Selection
-// Comment out to use Classical PI (no decoupling) - Test 2.0
-// Uncomment to use State Feedback Decoupling - Tests 2.1.1, 2.1.2
-//#define STATE_FEEDBACK_DECOUPLING
-
 // Lab 4-1: Speed Regulator Parameters
 // Update J_ESTIMATE and B_ESTIMATE after measuring them in test 1.1.
 // Adjust SPEED_REG_W_GCF for each bandwidth trial (2*pi*1, 2*pi*pi, 2*pi*10).
@@ -447,19 +442,12 @@ void task_wolfpack_callback(void *arg)
 	LOG_i_d_Error_Integral += LOG_i_d_Error * Ts;				// d and q-axis running integral of the current error.
 	LOG_i_q_Error_Integral += LOG_i_q_Error * Ts;
 
-#ifndef STATE_FEEDBACK_DECOUPLING
-	// Prelab 5: Classical PI regulator (Test 2.0) - no cross-coupling cancellation
+	// Classical synchronous-frame PI current regulator:
+	// v_d = Kpd * e_d + Kid * integral(e_d)
+	// v_q = w_e * lambda_pm + Kpq * e_q + Kiq * integral(e_q)
+	// This version intentionally does not include state-feedback decoupling terms.
 	LOG_v_cmd_d_BEMF = 0;
 	LOG_v_cmd_q_BEMF = PM_FLUX_V_SEC_PER_RAD * LOG_w_e_filtered;
-#else
-	// Prelab 5: State Feedback Decoupling (Tests 2.1.1, 2.1.2)
-	// Adds cross-coupling cancellation terms:
-	//   v_d += -we * Lq_est * iq   (cancel d-axis cross coupling)
-	//   v_q += +we * Ld_est * id   (cancel q-axis cross coupling, in addition to BEMF)
-	LOG_v_cmd_d_BEMF = +LOG_w_e_filtered * L_QS_ESTIMATE * LOG_i_q;
-	LOG_v_cmd_q_BEMF = -PM_FLUX_V_SEC_PER_RAD * LOG_w_e_filtered
-	                   + LOG_w_e_filtered * L_DS_ESTIMATE * LOG_i_d;
-#endif
 	LOG_v_cmd_d_Prop = IREG_KPD * LOG_i_d_Error;
 	LOG_v_cmd_d_Inte = IREG_KID * LOG_i_d_Error_Integral;
 	LOG_v_cmd_d = LOG_v_cmd_d_BEMF + LOG_v_cmd_d_Prop + LOG_v_cmd_d_Inte;
