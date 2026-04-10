@@ -60,10 +60,10 @@
 #define J_ESTIMATE        (0.0042668)                  // Rotational inertia estimate [kg*m^2]
 #define B_ESTIMATE        (0.0020483)                  // Rotational damping estimate [N*m*s/rad]
 #define SPEED_REG_W_GCF   (6.28318530718)        // Speed regulator gain crossover frequency [rad/s] (default: 2*pi*1 Hz)
-#define Kp_w_m            (J_ESTIMATE * SPEED_REG_W_GCF)   // Speed PI proportional gain [N*m*s/rad]
-#define Ki_w_m            (B_ESTIMATE * SPEED_REG_W_GCF)   // Speed PI integral gain [N*m/rad]
-#define POS_REG_KP        (12.0)                  // Position loop proportional gain [rad/s per rad]
-#define POS_W_M_REF_MAX   (40.0)                  // Position-loop speed command limit [rad/s]
+#define Kp_w_m_DEFAULT    (J_ESTIMATE * SPEED_REG_W_GCF)   // Speed PI proportional gain [N*m*s/rad]
+#define Ki_w_m_DEFAULT    (B_ESTIMATE * SPEED_REG_W_GCF)   // Speed PI integral gain [N*m/rad]
+#define POS_REG_KP_DEFAULT      (12.0)             // Position loop proportional gain [rad/s per rad]
+#define POS_W_M_REF_MAX_DEFAULT (40.0)             // Position-loop speed command limit [rad/s]
 
 
 const uint8_t amds_port = 1;
@@ -128,6 +128,8 @@ double LOG_theta_m_accum = 0;          // Unwrapped mechanical angle [rad]
 double LOG_theta_m_ref = 0;            // Mechanical position reference [rad]
 double LOG_theta_m_error = 0;          // Position error [rad]
 int en_position_loop = 0;              // 1 = position loop generates speed reference
+double pos_reg_kp = POS_REG_KP_DEFAULT;
+double pos_w_m_ref_max = POS_W_M_REF_MAX_DEFAULT;
 
 // Encoder and Analog Inputs AMDS raw counts from each channel (Card)
 uint32_t LOG_enc_pos_data = 0;			// Encoder counts
@@ -165,6 +167,8 @@ double LOG_T_e_cmd_prop = 0;			// Speed PI proportional torque command [N*m]
 double LOG_T_e_cmd_inte = 0;			// Speed PI integral torque command [N*m]
 double LOG_T_e_cmd = 0;				// Total speed PI torque command [N*m]
 double w_m_error = 0;					// Speed error (ref - actual) [rad/s]
+double speed_kp = Kp_w_m_DEFAULT;
+double speed_ki = Ki_w_m_DEFAULT;
 
 double LOG_i_q_ref_manual = 0;			// Manual input qd current references
 double LOG_i_d_ref_manual = 0;			// These are both reset in the IDLE state
@@ -193,6 +197,10 @@ double LOG_v_cmd_d_BEMF = 0;			// Back EMF voltage in d-axis
 double LOG_v_cmd_d_Prop = 0;		// Kp * Error term in d-axis
 double LOG_v_cmd_d_Inte = 0;	// Ki * Integral of Error in d-axis
 double LOG_v_cmd_d = 0;					// Total voltage command in d-axis
+double ireg_kpd = IREG_KPD;
+double ireg_kid = IREG_KID;
+double ireg_kpq = IREG_KPQ;
+double ireg_kiq = IREG_KIQ;
 
 double LOG_v_cmd_0 = 0;					// Zero sequence voltage command
 
@@ -397,12 +405,12 @@ void task_wolfpack_callback(void *arg)
 
 	if (en_position_loop) {
 		LOG_theta_m_error = LOG_theta_m_ref - LOG_theta_m_accum;
-		LOG_w_m_ref = POS_REG_KP * LOG_theta_m_error;
-		if (LOG_w_m_ref > POS_W_M_REF_MAX) {
-			LOG_w_m_ref = POS_W_M_REF_MAX;
+		LOG_w_m_ref = pos_reg_kp * LOG_theta_m_error;
+		if (LOG_w_m_ref > pos_w_m_ref_max) {
+			LOG_w_m_ref = pos_w_m_ref_max;
 		}
-		else if (LOG_w_m_ref < -POS_W_M_REF_MAX) {
-			LOG_w_m_ref = -POS_W_M_REF_MAX;
+		else if (LOG_w_m_ref < -pos_w_m_ref_max) {
+			LOG_w_m_ref = -pos_w_m_ref_max;
 		}
 	}
 	else {
@@ -420,8 +428,8 @@ void task_wolfpack_callback(void *arg)
 	// Kp_w_m = J_ESTIMATE * SPEED_REG_W_GCF, Ki_w_m = B_ESTIMATE * SPEED_REG_W_GCF.
 	// Set Kp_w_m = 0 and Ki_w_m = 0 (via J_ESTIMATE=B_ESTIMATE=0) for open-loop test 1.1.
 	w_m_error = LOG_w_m_ref - LOG_w_m_filtered;
-	LOG_T_e_cmd_prop = Kp_w_m * w_m_error;
-	LOG_T_e_cmd_inte += Ki_w_m * w_m_error * Ts;
+	LOG_T_e_cmd_prop = speed_kp * w_m_error;
+	LOG_T_e_cmd_inte += speed_ki * w_m_error * Ts;
 	LOG_T_e_cmd = LOG_T_e_cmd_prop + LOG_T_e_cmd_inte;
 
 	// Lab 4-1 Prelab 5: Compute i_s_ref from torque command for MTPA
@@ -473,12 +481,12 @@ void task_wolfpack_callback(void *arg)
 	// This version intentionally does not include state-feedback decoupling terms.
 	LOG_v_cmd_d_BEMF = 0;
 	LOG_v_cmd_q_BEMF = PM_FLUX_V_SEC_PER_RAD * LOG_w_e_filtered;
-	LOG_v_cmd_d_Prop = IREG_KPD * LOG_i_d_Error;
-	LOG_v_cmd_d_Inte = IREG_KID * LOG_i_d_Error_Integral;
+	LOG_v_cmd_d_Prop = ireg_kpd * LOG_i_d_Error;
+	LOG_v_cmd_d_Inte = ireg_kid * LOG_i_d_Error_Integral;
 	LOG_v_cmd_d = LOG_v_cmd_d_BEMF + LOG_v_cmd_d_Prop + LOG_v_cmd_d_Inte;
 
-	LOG_v_cmd_q_Prop = IREG_KPQ * LOG_i_q_Error;
-	LOG_v_cmd_q_Inte = IREG_KIQ * LOG_i_q_Error_Integral;
+	LOG_v_cmd_q_Prop = ireg_kpq * LOG_i_q_Error;
+	LOG_v_cmd_q_Inte = ireg_kiq * LOG_i_q_Error_Integral;
 	LOG_v_cmd_q = LOG_v_cmd_q_BEMF + LOG_v_cmd_q_Prop + LOG_v_cmd_q_Inte;
 
 	v_cmd_dq0[0] = LOG_v_cmd_d;									// Assign the individual d, q, 0 voltage commands to the vector elements.
@@ -581,6 +589,54 @@ int task_wolfpack_set_theta_m_ref(double theta)
 {
 	en_position_loop = 1;
 	LOG_theta_m_ref = theta;
+    return SUCCESS;
+}
+
+int task_wolfpack_set_pos_kp(double kp)
+{
+	pos_reg_kp = kp;
+    return SUCCESS;
+}
+
+int task_wolfpack_set_pos_w_m_ref_max(double w_max)
+{
+	pos_w_m_ref_max = fabs(w_max);
+    return SUCCESS;
+}
+
+int task_wolfpack_set_speed_kp(double kp)
+{
+	speed_kp = kp;
+    return SUCCESS;
+}
+
+int task_wolfpack_set_speed_ki(double ki)
+{
+	speed_ki = ki;
+    return SUCCESS;
+}
+
+int task_wolfpack_set_ireg_kpd(double kp)
+{
+	ireg_kpd = kp;
+    return SUCCESS;
+}
+
+int task_wolfpack_set_ireg_kid(double ki)
+{
+	ireg_kid = ki;
+    return SUCCESS;
+}
+
+int task_wolfpack_set_ireg_kpq(double kp)
+{
+	ireg_kpq = kp;
+    return SUCCESS;
+}
+
+int task_wolfpack_set_ireg_kiq(double ki)
+{
+	ireg_kiq = ki;
     return SUCCESS;
 }
 

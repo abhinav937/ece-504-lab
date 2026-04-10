@@ -23,6 +23,14 @@ int task_wolfpack_set_i_q_ref_manual(double i);
 int task_wolfpack_set_i_d_ref_manual(double i);
 int task_wolfpack_set_w_m_ref(double w);
 int task_wolfpack_set_theta_m_ref(double theta);
+int task_wolfpack_set_pos_kp(double kp);
+int task_wolfpack_set_pos_w_m_ref_max(double w_max);
+int task_wolfpack_set_speed_kp(double kp);
+int task_wolfpack_set_speed_ki(double ki);
+int task_wolfpack_set_ireg_kpd(double kp);
+int task_wolfpack_set_ireg_kid(double ki);
+int task_wolfpack_set_ireg_kpq(double kp);
+int task_wolfpack_set_ireg_kiq(double ki);
 
 double compute_log_dt(double current);
 void task_controller_stats_print(void);
