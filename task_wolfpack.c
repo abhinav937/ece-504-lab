@@ -62,6 +62,8 @@
 #define SPEED_REG_W_GCF   (6.28318530718)        // Speed regulator gain crossover frequency [rad/s] (default: 2*pi*1 Hz)
 #define Kp_w_m            (J_ESTIMATE * SPEED_REG_W_GCF)   // Speed PI proportional gain [N*m*s/rad]
 #define Ki_w_m            (B_ESTIMATE * SPEED_REG_W_GCF)   // Speed PI integral gain [N*m/rad]
+#define POS_REG_KP        (12.0)                  // Position loop proportional gain [rad/s per rad]
+#define POS_W_M_REF_MAX   (40.0)                  // Position-loop speed command limit [rad/s]
 
 
 const uint8_t amds_port = 1;
@@ -122,6 +124,10 @@ double LOG_w_m_filtered = 0;			// Rotor speed, mech, after digital filter [rad/s
 double LOG_w_e_filtered = 0;			// Rotor speed, elec, after digital filter [rad/s]
 
 double LOG_theta_e_ref_frame = 0;		// Angle to be used in Park Transformations
+double LOG_theta_m_accum = 0;          // Unwrapped mechanical angle [rad]
+double LOG_theta_m_ref = 0;            // Mechanical position reference [rad]
+double LOG_theta_m_error = 0;          // Position error [rad]
+int en_position_loop = 0;              // 1 = position loop generates speed reference
 
 // Encoder and Analog Inputs AMDS raw counts from each channel (Card)
 uint32_t LOG_enc_pos_data = 0;			// Encoder counts
@@ -256,6 +262,8 @@ void task_wolfpack_callback(void *arg)
 	}
 	else { } 														// No need to change delta_theta_m if it's already within -PI to +PI;
 
+	LOG_theta_m_accum += LOG_delta_theta_m;
+
 	// ****** Math to calculate speed from difference in angle b/w control periods, filter the speed due to angle chatter, convert to rad/s, rad/s electrical, etc.
 	LOG_w_m = LOG_delta_theta_m * TASK_WOLFPACK_UPDATES_PER_SEC;	// Mechanical speed, [rad/s]
 	LOG_w_m_RPM = RAD_PER_SEC_TO_RPM(LOG_w_m);						// Convert speed [rad/s] to [RPM]
@@ -314,6 +322,9 @@ void task_wolfpack_callback(void *arg)
 		LOG_i_d_ref_manual = 0;			// Clear manual d and q current commands
 		LOG_i_q_ref_manual = 0;
 		LOG_w_m_ref = 0;				// Clear speed reference and speed PI states
+		LOG_theta_m_ref = LOG_theta_m_accum;
+		LOG_theta_m_error = 0;
+		en_position_loop = 0;
 		LOG_T_e_cmd_prop = 0;
 		LOG_T_e_cmd_inte = 0;
 		LOG_T_e_cmd = 0;
@@ -383,6 +394,20 @@ void task_wolfpack_callback(void *arg)
 	LOG_i_d = i_dq0[0];											// Assign results of 3 element array individual current variables
 	LOG_i_q = i_dq0[1];
 	LOG_i_0 = i_dq0[2];
+
+	if (en_position_loop) {
+		LOG_theta_m_error = LOG_theta_m_ref - LOG_theta_m_accum;
+		LOG_w_m_ref = POS_REG_KP * LOG_theta_m_error;
+		if (LOG_w_m_ref > POS_W_M_REF_MAX) {
+			LOG_w_m_ref = POS_W_M_REF_MAX;
+		}
+		else if (LOG_w_m_ref < -POS_W_M_REF_MAX) {
+			LOG_w_m_ref = -POS_W_M_REF_MAX;
+		}
+	}
+	else {
+		LOG_theta_m_error = 0;
+	}
 
 	// Prelab 4: Torque Estimate
 	// T_e = (3/2) * (poles/2) * [lambda_pm * i_q + i_q * i_d * (Ld - Lq)]
@@ -547,7 +572,15 @@ int task_wolfpack_set_i_d_ref_manual(double i)
 
 int task_wolfpack_set_w_m_ref(double w)
 {
+	en_position_loop = 0;
 	LOG_w_m_ref = w;
+    return SUCCESS;
+}
+
+int task_wolfpack_set_theta_m_ref(double theta)
+{
+	en_position_loop = 1;
+	LOG_theta_m_ref = theta;
     return SUCCESS;
 }
 

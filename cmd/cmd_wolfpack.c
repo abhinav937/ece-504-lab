@@ -26,7 +26,8 @@ static command_help_t cmd_help[] = {
 	{ "sm_trip_clear", "Request SM Trip Clear, only acknowledged from TRIPPED" },
     { "set_i_q_ref_manual", "Set q axis current manual ref [A]" },
     { "set_i_d_ref_manual", "Set d axis current manual ref [A]" },
-	{ "set_w_m_ref", "Set the commanded rotor speed reference [rad/s]"},
+		{ "set_w_m_ref", "Set the commanded rotor speed reference [rad/s]"},
+		{ "set_theta_m_ref", "Set the commanded mechanical position reference [rad]"},
 
 };
 
@@ -112,15 +113,23 @@ int cmd_wolfpack(int argc, char **argv)
         return CMD_SUCCESS;
     }
 
-    if (argc == 3 && STREQ("set_w_m_ref", argv[1])) {
-        double w = strtod(argv[2], NULL);
-        if (task_wolfpack_set_w_m_ref(w) != SUCCESS) {
-            return CMD_FAILURE;
-        }
-        return CMD_SUCCESS;
-    }
+	    if (argc == 3 && STREQ("set_w_m_ref", argv[1])) {
+	        double w = strtod(argv[2], NULL);
+	        if (task_wolfpack_set_w_m_ref(w) != SUCCESS) {
+	            return CMD_FAILURE;
+	        }
+	        return CMD_SUCCESS;
+	    }
 
-    return CMD_INVALID_ARGUMENTS;
+	    if (argc == 3 && STREQ("set_theta_m_ref", argv[1])) {
+	        double theta = strtod(argv[2], NULL);
+	        if (task_wolfpack_set_theta_m_ref(theta) != SUCCESS) {
+	            return CMD_FAILURE;
+	        }
+	        return CMD_SUCCESS;
+	    }
+
+	    return CMD_INVALID_ARGUMENTS;
 }
 
 #endif // APP_WOLFPACK
