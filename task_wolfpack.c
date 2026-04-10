@@ -408,15 +408,21 @@ void task_wolfpack_callback(void *arg)
 	// T_e = (3/2) * P * lambda_pm * i_s  =>  i_s_ref = T_e_cmd / (1.5 * P * lambda_pm)
 	LOG_i_s_ref = LOG_T_e_cmd / (1.5 * POLE_PAIRS * PM_FLUX_V_SEC_PER_RAD);
 
-	// Prelab 6: Maximum Torque Per Ampere (MTPA)
-	// i_d_mtpa = (lambda_pm - sqrt(lambda_pm^2 + 8*(Lq-Ld)*is_ref^2)) / (4*(Lq-Ld))
-	// i_q_mtpa = sign(is_ref) * sqrt(is_ref^2 - i_d_mtpa^2)
-	double mtpa_radicand = PM_FLUX_V_SEC_PER_RAD * PM_FLUX_V_SEC_PER_RAD
-	        + 8.0 * (L_QS_ESTIMATE - L_DS_ESTIMATE) * LOG_i_s_ref * LOG_i_s_ref;
-	LOG_i_d_mtpa = (PM_FLUX_V_SEC_PER_RAD - sqrt(mtpa_radicand))
-	        / (4.0 * (L_QS_ESTIMATE - L_DS_ESTIMATE));
-	double iq_mtpa_radicand = LOG_i_s_ref * LOG_i_s_ref - LOG_i_d_mtpa * LOG_i_d_mtpa;
-	LOG_i_q_mtpa = (LOG_i_s_ref >= 0.0 ? 1.0 : -1.0) * sqrt(fmax(0.0, iq_mtpa_radicand));
+		// Prelab 6: Maximum Torque Per Ampere (MTPA)
+		// For Lq > Ld, use the IPM MTPA solution:
+		// i_d_mtpa = (lambda_pm - sqrt(lambda_pm^2 + 8*(Lq-Ld)^2*is_ref^2)) / (4*(Lq-Ld))
+		// i_q_mtpa = sign(is_ref) * sqrt(is_ref^2 - i_d_mtpa^2)
+		double delta_L = L_QS_ESTIMATE - L_DS_ESTIMATE;
+		if (fabs(delta_L) > 1e-12) {
+			double mtpa_radicand = PM_FLUX_V_SEC_PER_RAD * PM_FLUX_V_SEC_PER_RAD
+			        + 8.0 * delta_L * delta_L * LOG_i_s_ref * LOG_i_s_ref;
+			LOG_i_d_mtpa = (PM_FLUX_V_SEC_PER_RAD - sqrt(mtpa_radicand))
+			        / (4.0 * delta_L);
+		} else {
+			LOG_i_d_mtpa = 0.0;
+		}
+		double iq_mtpa_radicand = LOG_i_s_ref * LOG_i_s_ref - LOG_i_d_mtpa * LOG_i_d_mtpa;
+		LOG_i_q_mtpa = (LOG_i_s_ref >= 0.0 ? 1.0 : -1.0) * sqrt(fmax(0.0, iq_mtpa_radicand));
 
 	// Prelab 7: Total d and q references = MTPA + manual inputs
 	LOG_i_d_ref = LOG_i_d_mtpa + LOG_i_d_ref_manual;
