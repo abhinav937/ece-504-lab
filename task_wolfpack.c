@@ -112,7 +112,7 @@ double LOG_duty_c = 0.5;
 // *************  Rotor angle, speed, and scaling, etc. variables *************
 double LOG_theta_m = 0;					// Rotor angle, mech [rad]
 double LOG_theta_e = 0;					// Rotor angle, elec [rad]
-double theta_e_offset = -1.047197;		// Offset angle added to theta_e for reference frame [rad]
+double theta_e_offset = 2.007;		// Offset angle added to theta_e for reference frame [rad]
 
 double theta_m_prev = 0;   				// Rotor angle, mech, from last ISR [rad]
 double LOG_delta_theta_m = 0;			// Incremental rotor angle, mech [rad];
@@ -330,7 +330,7 @@ void task_wolfpack_callback(void *arg)
 		LOG_i_d_ref_manual = 0;			// Clear manual d and q current commands
 		LOG_i_q_ref_manual = 0;
 		LOG_w_m_ref = 0;				// Clear speed reference and speed PI states
-		LOG_theta_m_ref = LOG_theta_m_accum;
+		LOG_theta_m_ref = LOG_theta_m;   // absolute position wrt Z-pulse
 		LOG_theta_m_error = 0;
 		en_position_loop = 0;
 		LOG_T_e_cmd_prop = 0;
@@ -403,18 +403,25 @@ void task_wolfpack_callback(void *arg)
 	LOG_i_q = i_dq0[1];
 	LOG_i_0 = i_dq0[2];
 
+	// ==================== POSITION REGULATOR (ABSOLUTE wrt Z-PULSE) ====================
 	if (en_position_loop) {
-		LOG_theta_m_error = LOG_theta_m_ref - LOG_theta_m_accum;
-		LOG_w_m_ref = pos_reg_kp * LOG_theta_m_error;
-		if (LOG_w_m_ref > pos_w_m_ref_max) {
-			LOG_w_m_ref = pos_w_m_ref_max;
-		}
-		else if (LOG_w_m_ref < -pos_w_m_ref_max) {
-			LOG_w_m_ref = -pos_w_m_ref_max;
-		}
+	    LOG_theta_m_error = LOG_theta_m_ref - LOG_theta_m;   // use wrapped absolute angle
+
+
+	    while (LOG_theta_m_error > PI)   LOG_theta_m_error -= PI2;
+	    while (LOG_theta_m_error < -PI)  LOG_theta_m_error += PI2;
+
+	    LOG_w_m_ref = pos_reg_kp * LOG_theta_m_error;
+
+	    if (LOG_w_m_ref > pos_w_m_ref_max) {
+	        LOG_w_m_ref = pos_w_m_ref_max;
+	    }
+	    else if (LOG_w_m_ref < -pos_w_m_ref_max) {
+	        LOG_w_m_ref = -pos_w_m_ref_max;
+	    }
 	}
 	else {
-		LOG_theta_m_error = 0;
+	    LOG_theta_m_error = 0;
 	}
 
 	// Prelab 4: Torque Estimate
@@ -587,8 +594,9 @@ int task_wolfpack_set_w_m_ref(double w)
 
 int task_wolfpack_set_theta_m_ref(double theta)
 {
-	en_position_loop = 1;
-	LOG_theta_m_ref = theta;
+    en_position_loop = 1;
+    LOG_theta_m_ref = fmod(theta, PI2);
+    if (LOG_theta_m_ref < 0.0) LOG_theta_m_ref += PI2;
     return SUCCESS;
 }
 
