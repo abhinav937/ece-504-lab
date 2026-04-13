@@ -5,7 +5,8 @@
       "Bash(python -c \":*)",
       "Bash(pip install pypdf pdfplumber)",
       "Bash(git add:*)",
-      "Bash(git commit -m ':*)"
+      "Bash(git commit -m ':*)",
+      "Bash(git commit:*)"
     ]
   }
 }
