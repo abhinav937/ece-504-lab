@@ -64,6 +64,9 @@
 #define Ki_w_m_DEFAULT    (B_ESTIMATE * SPEED_REG_W_GCF)   // Speed PI integral gain [N*m/rad]
 #define POS_REG_KP_DEFAULT      (12.0)             // Position loop proportional gain [rad/s per rad]
 #define POS_W_M_REF_MAX_DEFAULT (40.0)             // Position-loop speed command limit [rad/s]
+#define POS_VFF_GAIN_DEFAULT    (1.0)              // Velocity feedforward gain (1.0 = full, 0 = off)
+#define SPD_AFF_GAIN_DEFAULT    (J_ESTIMATE)       // Accel feedforward gain [kg*m^2] — set to J for full feedforward
+#define T_E_MAX  (1.5 * POLE_PAIRS * PM_FLUX_V_SEC_PER_RAD * VECTOR_CURRENT_LIMIT)  // Speed integrator anti-windup clamp [N*m]
 
 
 const uint8_t amds_port = 1;
@@ -74,7 +77,7 @@ double Ts = 1.0 / (double) TASK_WOLFPACK_UPDATES_PER_SEC;
 // ****** State machine and related variables
 
 int LOG_wolf_state = 1;					// Wolfpack code state machine present value.  0 = CALIBRATE, 1 = IDLE, 2 = RUNNING, 3 = TRIPPED
-int wolf_state_prev = 1;				// Wolfpack code state machine previous value.  0 = CALIBRATE, 1 = IDLE, 2 = RUNNING, 3 = TRIPPED
+int wolf_state_prev = 0;				// Wolfpack code state machine previous value — intentionally != LOG_wolf_state so IDLE entry block fires on first ISR cycle
 int sm_request_idle = 0;				// Wolfpack code state machine IDLE state request. 0 = IDLE state NOT requested, 1 = IDLE state requested
 int sm_request_run = 0;					// Wolfpack code state machine RUN state request. 0 = RUN state NOT requested, 1 = RUN state requested
 int sm_request_calibrate = 0;			// Wolfpack code state machine CALIBRATE state request. 0 = CALIBRATE state NOT requested, 1 = CALIBRATE state requested
@@ -128,8 +131,15 @@ double LOG_theta_m_accum = 0;          // Unwrapped mechanical angle [rad]
 double LOG_theta_m_ref = 0;            // Mechanical position reference [rad]
 double LOG_theta_m_error = 0;          // Position error [rad]
 int en_position_loop = 0;              // 1 = position loop generates speed reference
+int pos_use_accum = 0;                 // 0 = single-rev wrapped (LOG_theta_m), 1 = multi-turn absolute (LOG_theta_m_accum)
 double pos_reg_kp = POS_REG_KP_DEFAULT;
 double pos_w_m_ref_max = POS_W_M_REF_MAX_DEFAULT;
+double pos_vff_gain = POS_VFF_GAIN_DEFAULT;   // Velocity feedforward gain
+double spd_aff_gain = SPD_AFF_GAIN_DEFAULT;   // Acceleration feedforward gain [kg*m^2]
+double theta_m_ref_prev = 0;                  // Position reference from last ISR, for velocity FF [rad]
+double LOG_w_m_ref_prev = 0;                  // Speed reference from last ISR, for accel FF [rad/s]
+double LOG_w_m_vff = 0;                       // Velocity feedforward contribution to speed ref [rad/s]
+double LOG_T_e_aff = 0;                       // Acceleration feedforward contribution to torque cmd [N*m]
 
 // Encoder and Analog Inputs AMDS raw counts from each channel (Card)
 uint32_t LOG_enc_pos_data = 0;			// Encoder counts
@@ -325,17 +335,24 @@ void task_wolfpack_callback(void *arg)
 	case 1: // ************* IDLE ******************
 		LOG_pwm_state = pwm_disable(); 	// Ensure that PWMs are disabled
 
-		LOG_i_q_Error_Integral = 0;		// Clear d and q current integrators
-		LOG_i_d_Error_Integral = 0;
-		LOG_i_d_ref_manual = 0;			// Clear manual d and q current commands
-		LOG_i_q_ref_manual = 0;
-		LOG_w_m_ref = 0;				// Clear speed reference and speed PI states
-		LOG_theta_m_ref = LOG_theta_m;   // absolute position wrt Z-pulse
-		LOG_theta_m_error = 0;
-		en_position_loop = 0;
-		LOG_T_e_cmd_prop = 0;
-		LOG_T_e_cmd_inte = 0;
-		LOG_T_e_cmd = 0;
+		if (wolf_state_prev != LOG_wolf_state) {  // One-time entry: reset all control state
+			LOG_i_q_Error_Integral = 0;
+			LOG_i_d_Error_Integral = 0;
+			LOG_i_d_ref_manual = 0;
+			LOG_i_q_ref_manual = 0;
+			LOG_w_m_ref = 0;
+			LOG_T_e_cmd_prop = 0;
+			LOG_T_e_cmd_inte = 0;
+			LOG_T_e_cmd = 0;
+			LOG_theta_m_ref = LOG_theta_m_accum;  // freeze reference at current multi-turn position
+			LOG_theta_m_error = 0;
+			en_position_loop = 0;
+			pos_use_accum = 0;
+			theta_m_ref_prev = LOG_theta_m_accum; // sync FF prev values to avoid spike on re-entry
+			LOG_w_m_ref_prev = 0;
+			LOG_w_m_vff = 0;
+			LOG_T_e_aff = 0;
+		}
 
 		if (LOG_protection_status)		// Transition to TRIPPED if protections are active.
 		{
@@ -403,25 +420,32 @@ void task_wolfpack_callback(void *arg)
 	LOG_i_q = i_dq0[1];
 	LOG_i_0 = i_dq0[2];
 
-	// ==================== POSITION REGULATOR (ABSOLUTE wrt Z-PULSE) ====================
+	// ==================== POSITION REGULATOR ====================
 	if (en_position_loop) {
-	    LOG_theta_m_error = LOG_theta_m_ref - LOG_theta_m;   // use wrapped absolute angle
+	    // Multi-turn absolute mode uses the unwrapped accumulated angle; single-rev uses wrapped angle.
+	    double theta_fb = pos_use_accum ? LOG_theta_m_accum : LOG_theta_m;
+	    LOG_theta_m_error = LOG_theta_m_ref - theta_fb;
 
+	    if (!pos_use_accum) {
+	        // Single-rev mode: wrap error to ±π so motor always takes the shortest path
+	        while (LOG_theta_m_error > PI)   LOG_theta_m_error -= PI2;
+	        while (LOG_theta_m_error < -PI)  LOG_theta_m_error += PI2;
+	    }
 
-	    while (LOG_theta_m_error > PI)   LOG_theta_m_error -= PI2;
-	    while (LOG_theta_m_error < -PI)  LOG_theta_m_error += PI2;
-
+	    // Proportional term
 	    LOG_w_m_ref = pos_reg_kp * LOG_theta_m_error;
 
-	    if (LOG_w_m_ref > pos_w_m_ref_max) {
-	        LOG_w_m_ref = pos_w_m_ref_max;
-	    }
-	    else if (LOG_w_m_ref < -pos_w_m_ref_max) {
-	        LOG_w_m_ref = -pos_w_m_ref_max;
-	    }
+	    // Velocity feedforward: differentiate position reference so motor anticipates motion.
+	    // For step commands this is naturally clamped with the speed limit below.
+	    LOG_w_m_vff = pos_vff_gain * (LOG_theta_m_ref - theta_m_ref_prev) * TASK_WOLFPACK_UPDATES_PER_SEC;
+	    LOG_w_m_ref += LOG_w_m_vff;
+
+	    if      (LOG_w_m_ref >  pos_w_m_ref_max) LOG_w_m_ref =  pos_w_m_ref_max;
+	    else if (LOG_w_m_ref < -pos_w_m_ref_max) LOG_w_m_ref = -pos_w_m_ref_max;
 	}
 	else {
 	    LOG_theta_m_error = 0;
+	    LOG_w_m_vff = 0;
 	}
 
 	// Prelab 4: Torque Estimate
@@ -437,7 +461,15 @@ void task_wolfpack_callback(void *arg)
 	w_m_error = LOG_w_m_ref - LOG_w_m_filtered;
 	LOG_T_e_cmd_prop = speed_kp * w_m_error;
 	LOG_T_e_cmd_inte += speed_ki * w_m_error * Ts;
-	LOG_T_e_cmd = LOG_T_e_cmd_prop + LOG_T_e_cmd_inte;
+	// Anti-windup: clamp speed integrator to physical torque limit
+	if      (LOG_T_e_cmd_inte >  T_E_MAX) LOG_T_e_cmd_inte =  T_E_MAX;
+	else if (LOG_T_e_cmd_inte < -T_E_MAX) LOG_T_e_cmd_inte = -T_E_MAX;
+
+	// Acceleration feedforward: J * d(w_ref)/dt — torque required to accelerate at the commanded rate.
+	// Bypasses the speed PI integrator so it stays wound-in during transients.
+	LOG_T_e_aff = spd_aff_gain * (LOG_w_m_ref - LOG_w_m_ref_prev) * TASK_WOLFPACK_UPDATES_PER_SEC;
+
+	LOG_T_e_cmd = LOG_T_e_cmd_prop + LOG_T_e_cmd_inte + LOG_T_e_aff;
 
 	// Lab 4-1 Prelab 5: Compute i_s_ref from torque command for MTPA
 	// T_e = (3/2) * P * lambda_pm * i_s  =>  i_s_ref = T_e_cmd / (1.5 * P * lambda_pm)
@@ -535,6 +567,8 @@ void task_wolfpack_callback(void *arg)
 
     // ***********  Prepare for next ISR ****************************
     theta_m_prev = LOG_theta_m;									// Assign present theta_m to theta_m_prev for use in the next ISR
+    theta_m_ref_prev = LOG_theta_m_ref;							// Save position reference for velocity feedforward differentiation
+    LOG_w_m_ref_prev = LOG_w_m_ref;								// Save speed reference for acceleration feedforward differentiation
     wolf_state_prev = LOG_wolf_state;							// Assign present state to previous
 
     // Compute and log the run time for this task
@@ -587,16 +621,51 @@ int task_wolfpack_set_i_d_ref_manual(double i)
 
 int task_wolfpack_set_w_m_ref(double w)
 {
+	LOG_T_e_cmd_inte = 0;  // reset integrator — prevents torque bump when exiting position mode
 	en_position_loop = 0;
+	pos_use_accum = 0;
 	LOG_w_m_ref = w;
     return SUCCESS;
 }
 
+// Single-revolution wrapped mode: reference in [0, 2π), shortest-path routing.
 int task_wolfpack_set_theta_m_ref(double theta)
 {
+    LOG_T_e_cmd_inte = 0;  // reset speed integrator to prevent bump on mode switch
+    pos_use_accum = 0;
     en_position_loop = 1;
     LOG_theta_m_ref = fmod(theta, PI2);
     if (LOG_theta_m_ref < 0.0) LOG_theta_m_ref += PI2;
+    theta_m_ref_prev = LOG_theta_m_ref;  // sync prev so first FF delta is zero, not stale
+    return SUCCESS;
+}
+
+// Multi-turn absolute mode: theta is the target angle in radians from the encoder power-on zero.
+// e.g. set_theta_m_ref_abs(0) -> go to encoder zero, set_theta_m_ref_abs(10*PI) -> go to 5 full CW turns.
+int task_wolfpack_set_theta_m_ref_abs(double theta)
+{
+    LOG_T_e_cmd_inte = 0;  // reset speed integrator to prevent bump on mode switch
+    pos_use_accum = 1;
+    en_position_loop = 1;
+    LOG_theta_m_ref = theta;
+    theta_m_ref_prev = LOG_theta_m_ref;  // sync prev so first FF delta is zero, not stale
+    return SUCCESS;
+}
+
+// Multi-turn relative mode: adds delta_theta to the current reference.
+// Calling this twice with 5π gives the same endpoint as calling once with 10π.
+// First call from non-accum mode anchors reference to current accumulated position first.
+int task_wolfpack_set_theta_m_ref_rel(double delta_theta)
+{
+    if (!en_position_loop || !pos_use_accum) {
+        // Entering relative mode fresh: anchor to current position so delta is from here.
+        LOG_T_e_cmd_inte = 0;
+        LOG_theta_m_ref = LOG_theta_m_accum;
+        theta_m_ref_prev = LOG_theta_m_accum;  // sync prev to avoid stale FF spike on first move
+    }
+    pos_use_accum = 1;
+    en_position_loop = 1;
+    LOG_theta_m_ref += delta_theta;
     return SUCCESS;
 }
 
@@ -609,6 +678,18 @@ int task_wolfpack_set_pos_kp(double kp)
 int task_wolfpack_set_pos_w_m_ref_max(double w_max)
 {
 	pos_w_m_ref_max = fabs(w_max);
+    return SUCCESS;
+}
+
+int task_wolfpack_set_pos_vff_gain(double gain)
+{
+    pos_vff_gain = gain;
+    return SUCCESS;
+}
+
+int task_wolfpack_set_spd_aff_gain(double gain)
+{
+    spd_aff_gain = gain;
     return SUCCESS;
 }
 

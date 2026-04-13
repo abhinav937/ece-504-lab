@@ -27,9 +27,13 @@ static command_help_t cmd_help[] = {
     { "set_i_q_ref_manual", "Set q axis current manual ref [A]" },
     { "set_i_d_ref_manual", "Set d axis current manual ref [A]" },
 	{ "set_w_m_ref", "Set the commanded rotor speed reference [rad/s]"},
-	{ "set_theta_m_ref", "Set the commanded mechanical position reference [rad]"},
+	{ "set_theta_m_ref", "Set single-rev position reference, [0, 2pi), shortest path [rad]"},
+	{ "set_theta_m_ref_abs", "Set absolute multi-turn position from encoder zero [rad]" },
+	{ "set_theta_m_ref_rel", "Add delta to current position reference; stacks: 5pi+5pi == 10pi [rad]" },
 	{ "set_pos_kp", "Set position-loop proportional gain [rad/s per rad]" },
 	{ "set_pos_w_m_ref_max", "Set position-loop speed command limit [rad/s]" },
+	{ "set_pos_vff_gain", "Set velocity feedforward gain (1.0=full, 0=off)" },
+	{ "set_spd_aff_gain", "Set acceleration feedforward gain, default=J [kg*m^2]" },
 	{ "set_speed_kp", "Set speed-loop proportional gain [N*m*s/rad]" },
 	{ "set_speed_ki", "Set speed-loop integral gain [N*m/rad]" },
 	{ "set_ireg_kpd", "Set d-axis current-loop proportional gain [V/A]" },
@@ -137,6 +141,22 @@ int cmd_wolfpack(int argc, char **argv)
         return CMD_SUCCESS;
     }
 
+    if (argc == 3 && STREQ("set_theta_m_ref_abs", argv[1])) {
+        double theta = strtod(argv[2], NULL);
+        if (task_wolfpack_set_theta_m_ref_abs(theta) != SUCCESS) {
+            return CMD_FAILURE;
+        }
+        return CMD_SUCCESS;
+    }
+
+    if (argc == 3 && STREQ("set_theta_m_ref_rel", argv[1])) {
+        double delta = strtod(argv[2], NULL);
+        if (task_wolfpack_set_theta_m_ref_rel(delta) != SUCCESS) {
+            return CMD_FAILURE;
+        }
+        return CMD_SUCCESS;
+    }
+
     if (argc == 3 && STREQ("set_pos_kp", argv[1])) {
         double kp = strtod(argv[2], NULL);
         if (task_wolfpack_set_pos_kp(kp) != SUCCESS) {
@@ -148,6 +168,22 @@ int cmd_wolfpack(int argc, char **argv)
     if (argc == 3 && STREQ("set_pos_w_m_ref_max", argv[1])) {
         double w_max = strtod(argv[2], NULL);
         if (task_wolfpack_set_pos_w_m_ref_max(w_max) != SUCCESS) {
+            return CMD_FAILURE;
+        }
+        return CMD_SUCCESS;
+    }
+
+    if (argc == 3 && STREQ("set_pos_vff_gain", argv[1])) {
+        double gain = strtod(argv[2], NULL);
+        if (task_wolfpack_set_pos_vff_gain(gain) != SUCCESS) {
+            return CMD_FAILURE;
+        }
+        return CMD_SUCCESS;
+    }
+
+    if (argc == 3 && STREQ("set_spd_aff_gain", argv[1])) {
+        double gain = strtod(argv[2], NULL);
+        if (task_wolfpack_set_spd_aff_gain(gain) != SUCCESS) {
             return CMD_FAILURE;
         }
         return CMD_SUCCESS;

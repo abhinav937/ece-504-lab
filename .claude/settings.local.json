@@ -3,7 +3,9 @@
     "allow": [
       "Read(//c/Users/abhin/Downloads/**)",
       "Bash(python -c \":*)",
-      "Bash(pip install pypdf pdfplumber)"
+      "Bash(pip install pypdf pdfplumber)",
+      "Bash(git add:*)",
+      "Bash(git commit -m ':*)"
     ]
   }
 }
