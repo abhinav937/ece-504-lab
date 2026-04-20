@@ -40,6 +40,15 @@ static command_help_t cmd_help[] = {
 	{ "set_ireg_kid", "Set d-axis current-loop integral gain [V/(A*s)]" },
 	{ "set_ireg_kpq", "Set q-axis current-loop proportional gain [V/A]" },
 	{ "set_ireg_kiq", "Set q-axis current-loop integral gain [V/(A*s)]" },
+	{ "scurve_set_jmax",    "Set S-curve jerk limit, up direction [rad/s^3]" },
+	{ "scurve_set_amax",    "Set S-curve accel limit, up direction [rad/s^2]" },
+	{ "scurve_set_vmax",    "Set S-curve velocity limit, up direction [rad/s]" },
+	{ "scurve_set_jmax_dn", "Set S-curve jerk limit, down direction [rad/s^3]" },
+	{ "scurve_set_amax_dn", "Set S-curve accel limit, down direction [rad/s^2]" },
+	{ "scurve_set_vmax_dn", "Set S-curve velocity limit, down direction [rad/s]" },
+	{ "move_scurve_abs",    "S-curve move to absolute accumulated angle [rad]" },
+	{ "move_scurve_rel",    "S-curve move by relative delta from current/end position [rad]" },
+	{ "abort_scurve",       "Abort active S-curve trajectory and hold position" },
 
 };
 
@@ -234,6 +243,59 @@ int cmd_wolfpack(int argc, char **argv)
         if (task_wolfpack_set_ireg_kiq(ki) != SUCCESS) {
             return CMD_FAILURE;
         }
+        return CMD_SUCCESS;
+    }
+
+    if (argc == 3 && STREQ("scurve_set_jmax", argv[1])) {
+        float v = (float)strtod(argv[2], NULL);
+        if (task_wolfpack_scurve_set_jmax(v) != SUCCESS) return CMD_FAILURE;
+        return CMD_SUCCESS;
+    }
+
+    if (argc == 3 && STREQ("scurve_set_amax", argv[1])) {
+        float v = (float)strtod(argv[2], NULL);
+        if (task_wolfpack_scurve_set_amax(v) != SUCCESS) return CMD_FAILURE;
+        return CMD_SUCCESS;
+    }
+
+    if (argc == 3 && STREQ("scurve_set_vmax", argv[1])) {
+        float v = (float)strtod(argv[2], NULL);
+        if (task_wolfpack_scurve_set_vmax(v) != SUCCESS) return CMD_FAILURE;
+        return CMD_SUCCESS;
+    }
+
+    if (argc == 3 && STREQ("scurve_set_jmax_dn", argv[1])) {
+        float v = (float)strtod(argv[2], NULL);
+        if (task_wolfpack_scurve_set_jmax_dn(v) != SUCCESS) return CMD_FAILURE;
+        return CMD_SUCCESS;
+    }
+
+    if (argc == 3 && STREQ("scurve_set_amax_dn", argv[1])) {
+        float v = (float)strtod(argv[2], NULL);
+        if (task_wolfpack_scurve_set_amax_dn(v) != SUCCESS) return CMD_FAILURE;
+        return CMD_SUCCESS;
+    }
+
+    if (argc == 3 && STREQ("scurve_set_vmax_dn", argv[1])) {
+        float v = (float)strtod(argv[2], NULL);
+        if (task_wolfpack_scurve_set_vmax_dn(v) != SUCCESS) return CMD_FAILURE;
+        return CMD_SUCCESS;
+    }
+
+    if (argc == 3 && STREQ("move_scurve_abs", argv[1])) {
+        double theta = strtod(argv[2], NULL);
+        if (task_wolfpack_move_scurve_abs(theta) != SUCCESS) return CMD_FAILURE;
+        return CMD_SUCCESS;
+    }
+
+    if (argc == 3 && STREQ("move_scurve_rel", argv[1])) {
+        double delta = strtod(argv[2], NULL);
+        if (task_wolfpack_move_scurve_rel(delta) != SUCCESS) return CMD_FAILURE;
+        return CMD_SUCCESS;
+    }
+
+    if (argc == 2 && STREQ("abort_scurve", argv[1])) {
+        if (task_wolfpack_abort_scurve() != SUCCESS) return CMD_FAILURE;
         return CMD_SUCCESS;
     }
 

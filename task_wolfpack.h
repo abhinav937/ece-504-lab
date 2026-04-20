@@ -40,4 +40,15 @@ double compute_log_dt(double current);
 void task_controller_stats_print(void);
 void task_controller_stats_reset(void);
 
+// S-curve trajectory wrappers
+int task_wolfpack_scurve_set_jmax(float jmax);
+int task_wolfpack_scurve_set_amax(float amax);
+int task_wolfpack_scurve_set_vmax(float vmax);
+int task_wolfpack_scurve_set_jmax_dn(float jmax);
+int task_wolfpack_scurve_set_amax_dn(float amax);
+int task_wolfpack_scurve_set_vmax_dn(float vmax);
+int task_wolfpack_move_scurve_abs(double theta);
+int task_wolfpack_move_scurve_rel(double delta_theta);
+int task_wolfpack_abort_scurve(void);
+
 #endif // TASK_WOLFPACK_H

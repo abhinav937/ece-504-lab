@@ -2,6 +2,7 @@
 #ifdef APP_WOLFPACK
 
 #include "task_wolfpack.h"
+#include "traj_scurve.h"
 #include "drv/amds.h"
 #include "drv/analog.h"
 #include "drv/cpu_timer.h"
@@ -214,6 +215,10 @@ double ireg_kiq = IREG_KIQ;
 
 double LOG_v_cmd_0 = 0;					// Zero sequence voltage command
 
+// S-curve trajectory diagnostics
+int    LOG_scurve_phase    = 0;    // Active phase (0=idle, 1-7=running)
+double LOG_scurve_progress = 0.0;  // Move progress 0.0-1.0
+
 // Metrics for tracking control loop execution, ADC sampling etc.
 double LOG_control_looptime = 0;
 double LOG_control_runtime = 0;
@@ -225,6 +230,8 @@ int task_wolfpack_init(void)
     if (scheduler_tcb_is_registered(&tcb)) {
         return FAILURE;
     }
+    traj_scurve_init();
+
     // Fill TCB with parameters
     scheduler_tcb_init(&tcb, task_wolfpack_callback, NULL, "wolfpack", TASK_WOLFPACK_INTERVAL_USEC);
 
@@ -336,6 +343,7 @@ void task_wolfpack_callback(void *arg)
 		LOG_pwm_state = pwm_disable(); 	// Ensure that PWMs are disabled
 
 		if (wolf_state_prev != LOG_wolf_state) {  // One-time entry: reset all control state
+			traj_scurve_abort();
 			LOG_i_q_Error_Integral = 0;
 			LOG_i_d_Error_Integral = 0;
 			LOG_i_d_ref_manual = 0;
@@ -419,6 +427,17 @@ void task_wolfpack_callback(void *arg)
 	LOG_i_d = i_dq0[0];											// Assign results of 3 element array individual current variables
 	LOG_i_q = i_dq0[1];
 	LOG_i_0 = i_dq0[2];
+
+	// ==================== S-CURVE TRAJECTORY ====================
+	// If a trajectory is running, update LOG_theta_m_ref smoothly each ISR.
+	// The position P loop below then tracks this moving reference.
+	if (traj_scurve_is_active()) {
+	    LOG_theta_m_ref = traj_scurve_update();
+	    pos_use_accum   = 1;
+	    en_position_loop = 1;
+	}
+	LOG_scurve_phase    = traj_scurve_get_phase();
+	LOG_scurve_progress = (double) traj_scurve_get_progress();
 
 	// ==================== POSITION REGULATOR ====================
 	if (en_position_loop) {
@@ -733,6 +752,69 @@ int task_wolfpack_set_ireg_kiq(double ki)
 
 
 
+
+// ==================== S-CURVE TRAJECTORY WRAPPERS ====================
+
+int task_wolfpack_scurve_set_jmax(float jmax)
+{
+    traj_scurve_set_jmax(jmax);
+    return SUCCESS;
+}
+
+int task_wolfpack_scurve_set_amax(float amax)
+{
+    traj_scurve_set_amax(amax);
+    return SUCCESS;
+}
+
+int task_wolfpack_scurve_set_vmax(float vmax)
+{
+    traj_scurve_set_vmax(vmax);
+    return SUCCESS;
+}
+
+int task_wolfpack_scurve_set_jmax_dn(float jmax)
+{
+    traj_scurve_set_jmax_dn(jmax);
+    return SUCCESS;
+}
+
+int task_wolfpack_scurve_set_amax_dn(float amax)
+{
+    traj_scurve_set_amax_dn(amax);
+    return SUCCESS;
+}
+
+int task_wolfpack_scurve_set_vmax_dn(float vmax)
+{
+    traj_scurve_set_vmax_dn(vmax);
+    return SUCCESS;
+}
+
+int task_wolfpack_move_scurve_abs(double theta)
+{
+    LOG_T_e_cmd_inte = 0;   // reset speed integrator — prevents torque bump on mode entry
+    traj_scurve_move_abs(LOG_theta_m_accum, theta);
+    return SUCCESS;
+}
+
+int task_wolfpack_move_scurve_rel(double delta_theta)
+{
+    double pos_now = traj_scurve_is_active()
+                   ? traj_scurve_get_end_pos()
+                   : LOG_theta_m_accum;
+    LOG_T_e_cmd_inte = 0;
+    traj_scurve_move_abs(pos_now, pos_now + delta_theta);
+    return SUCCESS;
+}
+
+int task_wolfpack_abort_scurve(void)
+{
+    traj_scurve_abort();
+    // Freeze position reference at current accumulated angle so P loop holds position
+    LOG_theta_m_ref = LOG_theta_m_accum;
+    return SUCCESS;
+}
 
 void task_wolfpack_stats_print(void)
 {
