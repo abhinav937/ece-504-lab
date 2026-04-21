@@ -137,7 +137,6 @@ int pos_use_accum = 0;                 // 0 = single-rev wrapped (LOG_theta_m), 
 double pos_reg_kp = POS_REG_KP_DEFAULT;
 double pos_reg_ki = POS_REG_KI_DEFAULT;
 double pos_w_m_ref_max = POS_W_M_REF_MAX_DEFAULT;
-double pos_w_m_ref_prop = 0;                  // Position PI output before vff/saturation [rad/s]
 double pos_w_m_ref_inte = 0;                  // Position integrator contribution to speed ref [rad/s]
 double pos_vff_gain = POS_VFF_GAIN_DEFAULT;   // Velocity feedforward gain
 double theta_m_ref_prev = 0;                  // Position reference from last ISR, for velocity FF [rad]
@@ -350,7 +349,6 @@ void task_wolfpack_callback(void *arg)
 		LOG_pos_Error_Integral = 0;
 		en_position_loop = 0;
 		pos_use_accum = 0;
-		pos_w_m_ref_prop = 0;
 		pos_w_m_ref_inte = 0;
 		theta_m_ref_prev = LOG_theta_m_ref;
 		LOG_w_m_vff = 0;
@@ -649,7 +647,6 @@ int task_wolfpack_set_w_m_ref(double w)
 	pos_use_accum = 0;
 	LOG_pos_Error_Prop = 0;
 	LOG_pos_Error_Integral = 0;
-	pos_w_m_ref_prop = 0;
 	pos_w_m_ref_inte = 0;
 	LOG_w_m_ref = w;
     return SUCCESS;
@@ -661,7 +658,6 @@ int task_wolfpack_set_theta_m_ref(double theta)
     LOG_T_e_cmd_inte = 0;  // reset speed integrator to prevent bump on mode switch
     LOG_pos_Error_Prop = 0;
     LOG_pos_Error_Integral = 0;
-    pos_w_m_ref_prop = 0;
     pos_w_m_ref_inte = 0;
     pos_use_accum = 0;
     en_position_loop = 1;
@@ -678,7 +674,6 @@ int task_wolfpack_set_theta_m_ref_abs(double theta)
     LOG_T_e_cmd_inte = 0;  // reset speed integrator to prevent bump on mode switch
     LOG_pos_Error_Prop = 0;
     LOG_pos_Error_Integral = 0;
-    pos_w_m_ref_prop = 0;
     pos_w_m_ref_inte = 0;
     pos_use_accum = 1;
     en_position_loop = 1;
@@ -694,7 +689,6 @@ int task_wolfpack_set_theta_m_ref_rel(double delta_theta)
 {
     LOG_pos_Error_Prop = 0;
     LOG_pos_Error_Integral = 0;
-    pos_w_m_ref_prop = 0;
     pos_w_m_ref_inte = 0;
     if (!en_position_loop || !pos_use_accum) {
         // Entering relative mode fresh: anchor to current position so delta is from here.
