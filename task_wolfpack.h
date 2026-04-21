@@ -28,6 +28,7 @@ int task_wolfpack_set_theta_m_ref_rel(double delta_theta);
 int task_wolfpack_set_pos_kp(double kp);
 int task_wolfpack_set_pos_ki(double ki);
 int task_wolfpack_set_pos_w_m_ref_max(double w_max);
+int task_wolfpack_set_mtpa_en(int en);
 int task_wolfpack_set_pos_vff_gain(double gain);
 int task_wolfpack_set_speed_kp(double kp);
 int task_wolfpack_set_speed_ki(double ki);
@@ -40,15 +41,5 @@ double compute_log_dt(double current);
 void task_controller_stats_print(void);
 void task_controller_stats_reset(void);
 
-// S-curve trajectory wrappers
-int task_wolfpack_scurve_set_jmax(float jmax);
-int task_wolfpack_scurve_set_amax(float amax);
-int task_wolfpack_scurve_set_vmax(float vmax);
-int task_wolfpack_scurve_set_jmax_dn(float jmax);
-int task_wolfpack_scurve_set_amax_dn(float amax);
-int task_wolfpack_scurve_set_vmax_dn(float vmax);
-int task_wolfpack_move_scurve_abs(double theta);
-int task_wolfpack_move_scurve_rel(double delta_theta);
-int task_wolfpack_abort_scurve(void);
 
 #endif // TASK_WOLFPACK_H

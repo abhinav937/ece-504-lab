@@ -33,6 +33,7 @@ static command_help_t cmd_help[] = {
 	{ "set_pos_kp", "Set position-loop proportional gain [rad/s per rad]" },
 	{ "set_pos_ki", "Set position-loop integral gain [rad/s per rad*s]" },
 	{ "set_pos_w_m_ref_max", "Set position-loop speed command limit [rad/s]" },
+	{ "set_mtpa_en", "Enable (1) or disable (0) MTPA d/q current decomposition" },
 	{ "set_pos_vff_gain", "Set velocity feedforward gain (1.0=full, 0=off)" },
 	{ "set_speed_kp", "Set speed-loop proportional gain [N*m*s/rad]" },
 	{ "set_speed_ki", "Set speed-loop integral gain [N*m/rad]" },
@@ -40,16 +41,6 @@ static command_help_t cmd_help[] = {
 	{ "set_ireg_kid", "Set d-axis current-loop integral gain [V/(A*s)]" },
 	{ "set_ireg_kpq", "Set q-axis current-loop proportional gain [V/A]" },
 	{ "set_ireg_kiq", "Set q-axis current-loop integral gain [V/(A*s)]" },
-	{ "scurve_set_jmax",    "Set S-curve jerk limit, up direction [rad/s^3]" },
-	{ "scurve_set_amax",    "Set S-curve accel limit, up direction [rad/s^2]" },
-	{ "scurve_set_vmax",    "Set S-curve velocity limit, up direction [rad/s]" },
-	{ "scurve_set_jmax_dn", "Set S-curve jerk limit, down direction [rad/s^3]" },
-	{ "scurve_set_amax_dn", "Set S-curve accel limit, down direction [rad/s^2]" },
-	{ "scurve_set_vmax_dn", "Set S-curve velocity limit, down direction [rad/s]" },
-	{ "move_scurve_abs",    "S-curve move to absolute accumulated angle [rad]" },
-	{ "move_scurve_rel",    "S-curve move by relative delta from current/end position [rad]" },
-	{ "abort_scurve",       "Abort active S-curve trajectory and hold position" },
-
 };
 
 
@@ -190,6 +181,12 @@ int cmd_wolfpack(int argc, char **argv)
         return CMD_SUCCESS;
     }
 
+    if (argc == 3 && STREQ("set_mtpa_en", argv[1])) {
+        int en = (int)strtol(argv[2], NULL, 10);
+        if (task_wolfpack_set_mtpa_en(en) != SUCCESS) return CMD_FAILURE;
+        return CMD_SUCCESS;
+    }
+
     if (argc == 3 && STREQ("set_pos_vff_gain", argv[1])) {
         double gain = strtod(argv[2], NULL);
         if (task_wolfpack_set_pos_vff_gain(gain) != SUCCESS) {
@@ -246,58 +243,6 @@ int cmd_wolfpack(int argc, char **argv)
         return CMD_SUCCESS;
     }
 
-    if (argc == 3 && STREQ("scurve_set_jmax", argv[1])) {
-        float v = (float)strtod(argv[2], NULL);
-        if (task_wolfpack_scurve_set_jmax(v) != SUCCESS) return CMD_FAILURE;
-        return CMD_SUCCESS;
-    }
-
-    if (argc == 3 && STREQ("scurve_set_amax", argv[1])) {
-        float v = (float)strtod(argv[2], NULL);
-        if (task_wolfpack_scurve_set_amax(v) != SUCCESS) return CMD_FAILURE;
-        return CMD_SUCCESS;
-    }
-
-    if (argc == 3 && STREQ("scurve_set_vmax", argv[1])) {
-        float v = (float)strtod(argv[2], NULL);
-        if (task_wolfpack_scurve_set_vmax(v) != SUCCESS) return CMD_FAILURE;
-        return CMD_SUCCESS;
-    }
-
-    if (argc == 3 && STREQ("scurve_set_jmax_dn", argv[1])) {
-        float v = (float)strtod(argv[2], NULL);
-        if (task_wolfpack_scurve_set_jmax_dn(v) != SUCCESS) return CMD_FAILURE;
-        return CMD_SUCCESS;
-    }
-
-    if (argc == 3 && STREQ("scurve_set_amax_dn", argv[1])) {
-        float v = (float)strtod(argv[2], NULL);
-        if (task_wolfpack_scurve_set_amax_dn(v) != SUCCESS) return CMD_FAILURE;
-        return CMD_SUCCESS;
-    }
-
-    if (argc == 3 && STREQ("scurve_set_vmax_dn", argv[1])) {
-        float v = (float)strtod(argv[2], NULL);
-        if (task_wolfpack_scurve_set_vmax_dn(v) != SUCCESS) return CMD_FAILURE;
-        return CMD_SUCCESS;
-    }
-
-    if (argc == 3 && STREQ("move_scurve_abs", argv[1])) {
-        double theta = strtod(argv[2], NULL);
-        if (task_wolfpack_move_scurve_abs(theta) != SUCCESS) return CMD_FAILURE;
-        return CMD_SUCCESS;
-    }
-
-    if (argc == 3 && STREQ("move_scurve_rel", argv[1])) {
-        double delta = strtod(argv[2], NULL);
-        if (task_wolfpack_move_scurve_rel(delta) != SUCCESS) return CMD_FAILURE;
-        return CMD_SUCCESS;
-    }
-
-    if (argc == 2 && STREQ("abort_scurve", argv[1])) {
-        if (task_wolfpack_abort_scurve() != SUCCESS) return CMD_FAILURE;
-        return CMD_SUCCESS;
-    }
 
 	    return CMD_INVALID_ARGUMENTS;
 }
