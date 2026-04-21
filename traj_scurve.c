@@ -62,6 +62,7 @@ static void _compute_profile(float d, float j, float a, float v)
     float a_lim = sqrtf(v * j);
     if (a > a_lim) a = a_lim;
     s.a_eff = a;
+    s.j_eff = j;
 
     float t_j = a / j;
 

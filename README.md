@@ -145,6 +145,7 @@ The speed integrator is clamped to `±T_E_MAX = 1.5 × P × λ_pm × I_lim ≈ �
 | Command | Default | Description |
 |---|---|---|
 | `set_pos_kp <val>` | 12.0 | Position proportional gain [rad/s per rad]. Higher = faster response, more overshoot risk. |
+| `set_pos_ki <val>` | 20.0 | Position integral gain [rad/s per rad*s]. Removes steady-state position offset. |
 | `set_pos_w_m_ref_max <val>` | 40.0 | Speed command clamp [rad/s]. Limits how fast the motor chases position. |
 | `set_pos_vff_gain <val>` | 1.0 | Velocity feedforward gain. 1.0 = full feedforward, 0.0 = off. Reduce if following a smooth trajectory and you observe overshoot. |
 
@@ -154,13 +155,12 @@ The speed integrator is clamped to `±T_E_MAX = 1.5 × P × λ_pm × I_lim ≈ �
 |---|---|---|
 | `set_speed_kp <val>` | J × ω_gcf | Speed PI proportional gain [N·m·s/rad]. |
 | `set_speed_ki <val>` | B × ω_gcf | Speed PI integral gain [N·m/rad]. |
-| `set_spd_aff_gain <val>` | J_ESTIMATE | Acceleration feedforward gain [kg·m²]. Set to measured J for full feedforward, 0 to disable. |
 
 ### Tuning procedure
 
-1. Start with feedforward **disabled**: `set_pos_vff_gain 0` and `set_spd_aff_gain 0`.
-2. Tune `set_pos_kp` and speed loop gains until step response is acceptably damped.
-3. Re-enable acceleration feedforward: `set_spd_aff_gain 0.0042668` (or your measured J). Observe reduction in speed tracking lag.
+1. Start with velocity feedforward **disabled**: `set_pos_vff_gain 0`.
+2. Tune `set_pos_kp`, `set_pos_ki`, and the speed loop gains until the step response is acceptably damped and reaches zero steady-state error.
+3. Re-enable velocity feedforward: `set_pos_vff_gain 1.0`. Observe reduction in position tracking lag on moving references.
 4. Re-enable velocity feedforward: `set_pos_vff_gain 1.0`. Observe reduction in position tracking lag on moving references. If overshoot increases on step commands, this is normal — the FF is absorbed by the clamp and does not cause steady overshoot.
 
 ---
@@ -177,7 +177,6 @@ These variables are available for logging (e.g., via the AMDC host interface):
 | `LOG_theta_m_error` | Position error: ref − feedback [rad] |
 | `LOG_w_m_ref` | Speed reference output of position loop (post-clamp) [rad/s] |
 | `LOG_w_m_vff` | Velocity feedforward contribution to speed reference [rad/s] |
-| `LOG_T_e_aff` | Acceleration feedforward contribution to torque command [N·m] |
 | `LOG_T_e_cmd_prop` | Speed PI proportional torque command [N·m] |
 | `LOG_T_e_cmd_inte` | Speed PI integral torque command [N·m] |
 | `LOG_T_e_cmd` | Total torque command [N·m] |
