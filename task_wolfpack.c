@@ -225,122 +225,63 @@ static task_control_block_t tcb;  			// Scheduler TCB which holds task "context"
 
 // ==================== S-CURVE GLOBAL ENABLE + DEFAULT PARAMS ====================
 int    scurve_en = 0;              // 1 = route set_theta_m_ref_abs/_rel through S-curve
-int    scurve_method = 0;          // 0 = position S-curve (Method 1), 1 = velocity S-curve (Method 2)
 double scurve_default_v_max = 18.0;   // [rad/s]
 double scurve_default_a_max =  2.5;   // [rad/s^2]
 double scurve_default_j_max = 25.0;   // [rad/s^3]
 
-// ==================== METHOD 1: POSITION S-CURVE ====================
-int    scurve_pos_active = 0;
-double scurve_pos_t = 0.0;
-double scurve_pos_t_total = 0.0;
-double scurve_pos_t_accel = 0.0;   // duration of each accel/decel phase [s]
-double scurve_pos_t_const = 0.0;   // duration of constant-velocity phase [s]
-int    scurve_pos_has_const_vel = 0; // 1 = move is long enough for cruise phase
-double scurve_pos_theta_start = 0.0;
-double scurve_pos_theta_target = 0.0;
-double scurve_pos_v_max = 0.0;
-double scurve_pos_a_max = 0.0;
-double scurve_pos_j_max = 0.0;
+// ==================== CFF VELOCITY TRAJECTORY ====================
+int    scurve_active = 0;
+double scurve_t = 0.0;
+double scurve_t_total = 0.0;
+double scurve_v_max_cur = 0.0;
+double scurve_direction = 1.0;
+double scurve_target_theta = 0.0;
 
-// ==================== METHOD 2: VELOCITY S-CURVE ====================
-int    scurve_vel_active = 0;
-double scurve_vel_t = 0.0;
-double scurve_vel_t_total = 0.0;
-double scurve_vel_target_theta = 0.0;
-double scurve_vel_v_max = 0.0;
-double scurve_vel_a_max = 0.0;
-double scurve_vel_j_max = 0.0;
-int    scurve_vel_phase = 0;
-double scurve_vel_direction = 1.0;
+// ==================== CFF TORQUE FEEDFORWARD ====================
+double LOG_T_e_cmd_ff = 0.0;       // Torque feedforward from commanded acceleration [N*m]
+double speed_vff_gain = 1.0;       // CFF gain (0=off, 1=full model-based)
+static double w_m_ref_prev = 0.0;  // Previous velocity reference for derivative [rad/s]
 
 // ==================== S-CURVE LOGGING VARIABLES ====================
 double LOG_scurve_progress  = 0.0;  // normalized 0–1 progress of active trajectory
 double LOG_scurve_t_elapsed = 0.0;  // elapsed time of active trajectory [s]
 double LOG_scurve_t_total   = 0.0;  // total planned duration of active trajectory [s]
 
-static void update_scurve_position_reference(void)
+static void update_scurve_cff(void)
 {
-    scurve_pos_t += Ts;
+    scurve_t += Ts;
 
-    LOG_scurve_t_elapsed = scurve_pos_t;
-    LOG_scurve_t_total   = scurve_pos_t_total;
+    LOG_scurve_t_elapsed = scurve_t;
+    LOG_scurve_t_total   = scurve_t_total;
 
-    if (scurve_pos_t >= scurve_pos_t_total) {
-        LOG_theta_m_ref     = scurve_pos_theta_target;
-        scurve_pos_active   = 0;
-        LOG_scurve_progress = 1.0;
-        return;
-    }
-
-    LOG_scurve_progress = scurve_pos_t / scurve_pos_t_total;
-
-    double theta_ref;
-    double ta = scurve_pos_t_accel;
-    double tc = scurve_pos_t_const;
-    double vm = scurve_pos_v_max;
-
-    if (scurve_pos_has_const_vel) {
-        if (scurve_pos_t < ta) {
-            // Acceleration phase: raised-cosine ramp 0 → vm*ta
-            double p = scurve_pos_t / ta;
-            double s = 0.5 - 0.5 * cos(PI * p);
-            theta_ref = scurve_pos_theta_start + (vm * ta) * s;
-        } else if (scurve_pos_t < ta + tc) {
-            // Constant velocity phase
-            double t_in = scurve_pos_t - ta;
-            theta_ref = scurve_pos_theta_start + (vm * ta) + (vm * t_in);
-        } else {
-            // Deceleration phase: raised-cosine ramp vm*ta → 0 from target
-            double t_in = scurve_pos_t - ta - tc;
-            double p = t_in / ta;
-            double s = 0.5 + 0.5 * cos(PI * p);
-            theta_ref = scurve_pos_theta_target - (vm * ta) * s;
-        }
-    } else {
-        // Short move: single raised-cosine over full distance
-        double p = scurve_pos_t / scurve_pos_t_total;
-        double s = 0.5 - 0.5 * cos(PI * p);
-        theta_ref = scurve_pos_theta_start +
-                    (scurve_pos_theta_target - scurve_pos_theta_start) * s;
-    }
-
-    LOG_theta_m_ref = theta_ref;
-}
-
-static void update_scurve_velocity_reference(void)
-{
-    scurve_vel_t += Ts;
-
-    LOG_scurve_t_elapsed = scurve_vel_t;
-    LOG_scurve_t_total   = scurve_vel_t_total;
-
-    double progress = scurve_vel_t / scurve_vel_t_total;
+    double progress = scurve_t / scurve_t_total;
+    if (progress > 1.0) progress = 1.0;
     LOG_scurve_progress = progress;
 
-    double v_cmd = 0.0;
+    double v_cmd;
     if (progress < 0.5) {
         double s = 0.5 - 0.5 * cos(PI2 * progress);
-        v_cmd = scurve_vel_v_max * s;
+        v_cmd = scurve_v_max_cur * s;
     } else {
         double s = 0.5 + 0.5 * cos(PI2 * (progress - 0.5));
-        v_cmd = scurve_vel_v_max * s;
+        v_cmd = scurve_v_max_cur * s;
     }
 
-    LOG_w_m_ref = scurve_vel_direction * v_cmd;
+    LOG_w_m_ref = scurve_direction * v_cmd;
 
-    // Switch to position hold near target for precise stop
-    double remaining = fabs(scurve_vel_target_theta - LOG_theta_m_accum);
-    if (remaining < 0.5 && scurve_vel_phase < 3) {
-        task_wolfpack_set_theta_m_ref_abs(scurve_vel_target_theta);
-        scurve_vel_active   = 0;
-        scurve_vel_phase    = 3;
-        LOG_scurve_progress = 1.0;
-        return;
-    }
-
-    if (scurve_vel_t >= scurve_vel_t_total) {
-        scurve_vel_active = 0;
+    // Hand off to position loop for precise stop — near target or time expired
+    double remaining = fabs(scurve_target_theta - LOG_theta_m_accum);
+    if (remaining < 0.5 || scurve_t >= scurve_t_total) {
+        scurve_active          = 0;
+        LOG_scurve_progress    = 1.0;
+        LOG_T_e_cmd_inte       = 0;
+        LOG_pos_Error_Prop     = 0;
+        LOG_pos_Error_Integral = 0;
+        pos_w_m_ref_inte       = 0;
+        pos_use_accum          = 1;
+        en_position_loop       = 1;
+        LOG_theta_m_ref        = scurve_target_theta;
+        theta_m_ref_prev       = scurve_target_theta;
     }
 }
 
@@ -473,15 +414,15 @@ void task_wolfpack_callback(void *arg)
 		pos_w_m_ref_inte = 0;
 		theta_m_ref_prev = LOG_theta_m_ref;
 		LOG_w_m_vff = 0;
-		scurve_pos_active        = 0;
-		scurve_pos_has_const_vel = 0;
-		scurve_vel_active        = 0;
+		scurve_active        = 0;
 		LOG_scurve_progress  = 0.0;
 		LOG_scurve_t_elapsed = 0.0;
 		LOG_scurve_t_total   = 0.0;
 		LOG_T_e_cmd_prop = 0;
 		LOG_T_e_cmd_inte = 0;
-		LOG_T_e_cmd = 0;
+		LOG_T_e_cmd      = 0;
+		LOG_T_e_cmd_ff   = 0.0;
+		w_m_ref_prev     = 0.0;
 
 		if (LOG_protection_status)		// Transition to TRIPPED if protections are active.
 		{
@@ -512,12 +453,9 @@ void task_wolfpack_callback(void *arg)
 		{
 			LOG_wolf_state = 1;
 		}
-		// === S-CURVE TRAJECTORY UPDATES ===
-		if (scurve_pos_active) {
-			update_scurve_position_reference();
-		}
-		if (scurve_vel_active) {
-			update_scurve_velocity_reference();
+		// === CFF TRAJECTORY UPDATE ===
+		if (scurve_active) {
+			update_scurve_cff();
 		}
 
 		LOG_pwm_state = pwm_enable();				// Enable PWMs
@@ -621,7 +559,13 @@ void task_wolfpack_callback(void *arg)
 	if      (LOG_T_e_cmd_inte >  T_E_MAX) LOG_T_e_cmd_inte =  T_E_MAX;
 	else if (LOG_T_e_cmd_inte < -T_E_MAX) LOG_T_e_cmd_inte = -T_E_MAX;
 
-	LOG_T_e_cmd = LOG_T_e_cmd_prop + LOG_T_e_cmd_inte;
+	// CFF torque feedforward: T_ff = J * d(w_ref)/dt
+	LOG_T_e_cmd_ff = speed_vff_gain * J_ESTIMATE
+	                 * (LOG_w_m_ref - w_m_ref_prev)
+	                 * TASK_WOLFPACK_UPDATES_PER_SEC;
+	w_m_ref_prev = LOG_w_m_ref;
+
+	LOG_T_e_cmd = LOG_T_e_cmd_prop + LOG_T_e_cmd_inte + LOG_T_e_cmd_ff;
 
 	// Lab 4-1 Prelab 5: Compute i_s_ref from torque command for MTPA
 	// T_e = (3/2) * P * lambda_pm * i_s  =>  i_s_ref = T_e_cmd / (1.5 * P * lambda_pm)
@@ -808,16 +752,10 @@ int task_wolfpack_set_theta_m_ref(double theta)
 int task_wolfpack_set_theta_m_ref_abs(double theta)
 {
     if (scurve_en) {
-        if (scurve_method == 1)
-            task_wolfpack_start_scurve_velocity(theta / PI2,
-                                                scurve_default_v_max,
-                                                scurve_default_a_max,
-                                                scurve_default_j_max);
-        else
-            task_wolfpack_start_scurve_position(theta / PI2,
-                                                scurve_default_v_max,
-                                                scurve_default_a_max,
-                                                scurve_default_j_max);
+        task_wolfpack_start_scurve_cff(theta / PI2,
+                                       scurve_default_v_max,
+                                       scurve_default_a_max,
+                                       scurve_default_j_max);
         return SUCCESS;
     }
     LOG_T_e_cmd_inte = 0;
@@ -838,19 +776,12 @@ int task_wolfpack_set_theta_m_ref_abs(double theta)
 int task_wolfpack_set_theta_m_ref_rel(double delta_theta)
 {
     if (scurve_en) {
-        double abs_target = scurve_pos_active ? scurve_pos_theta_target
-                                              : LOG_theta_m_accum;
+        double abs_target = scurve_active ? scurve_target_theta : LOG_theta_m_accum;
         double rot = (abs_target + delta_theta) / PI2;
-        if (scurve_method == 1)
-            task_wolfpack_start_scurve_velocity(rot,
-                                                scurve_default_v_max,
-                                                scurve_default_a_max,
-                                                scurve_default_j_max);
-        else
-            task_wolfpack_start_scurve_position(rot,
-                                                scurve_default_v_max,
-                                                scurve_default_a_max,
-                                                scurve_default_j_max);
+        task_wolfpack_start_scurve_cff(rot,
+                                       scurve_default_v_max,
+                                       scurve_default_a_max,
+                                       scurve_default_j_max);
         return SUCCESS;
     }
     LOG_pos_Error_Prop = 0;
@@ -945,13 +876,6 @@ int task_wolfpack_set_scurve_en(int en)
     return SUCCESS;
 }
 
-int task_wolfpack_set_scurve_method(int method)
-{
-    if (method != 0 && method != 1) return FAILURE;
-    scurve_method = method;
-    return SUCCESS;
-}
-
 int task_wolfpack_set_scurve_v_max(double v)
 {
     if (v <= 0.0) return FAILURE;
@@ -975,8 +899,7 @@ int task_wolfpack_set_scurve_j_max(double j)
 
 int task_wolfpack_scurve_stop(void)
 {
-    scurve_pos_active = 0;
-    scurve_vel_active = 0;
+    scurve_active = 0;
     // Hold wherever the motor is right now
     task_wolfpack_set_theta_m_ref_abs(LOG_theta_m_accum);
     return SUCCESS;
@@ -986,81 +909,47 @@ int task_wolfpack_scurve_stop(void)
 
 void task_wolfpack_scurve_goto(double target_rotations)
 {
-    task_wolfpack_start_scurve_position(target_rotations,
-                                        scurve_default_v_max,
-                                        scurve_default_a_max,
-                                        scurve_default_j_max);
+    task_wolfpack_start_scurve_cff(target_rotations,
+                                   scurve_default_v_max,
+                                   scurve_default_a_max,
+                                   scurve_default_j_max);
 }
 
 void task_wolfpack_scurve_goto_vel(double target_rotations)
 {
-    task_wolfpack_start_scurve_velocity(target_rotations,
-                                        scurve_default_v_max,
-                                        scurve_default_a_max,
-                                        scurve_default_j_max);
+    task_wolfpack_start_scurve_cff(target_rotations,
+                                   scurve_default_v_max,
+                                   scurve_default_a_max,
+                                   scurve_default_j_max);
 }
 
-// ==================== S-CURVE STARTERS ====================
+// ==================== CFF TRAJECTORY STARTER ====================
 
-void task_wolfpack_start_scurve_position(double target_rotations,
-                                          double v_max, double a_max, double j_max)
+void task_wolfpack_start_scurve_cff(double target_rotations,
+                                     double v_max, double a_max, double j_max)
 {
     double target_theta = target_rotations * PI2;
     double delta = fabs(target_theta - LOG_theta_m_accum);
-    if (delta < 0.01) return;   // ignore moves smaller than ~0.01 rad
+    if (delta < 0.01) return;
 
-    scurve_pos_theta_start  = LOG_theta_m_accum;
-    scurve_pos_theta_target = target_theta;
-    scurve_pos_v_max        = v_max;
-    scurve_pos_a_max        = a_max;
-    scurve_pos_j_max        = j_max;
-    scurve_pos_t            = 0.0;
+    scurve_target_theta = target_theta;
+    scurve_v_max_cur    = v_max;
+    scurve_t            = 0.0;
+    scurve_direction    = (target_theta >= LOG_theta_m_accum) ? 1.0 : -1.0;
 
-    double t_accel   = a_max / j_max + v_max / a_max;   // duration of one accel phase
-    double dist_accel = v_max * t_accel;                 // distance covered per phase
+    double t_accel  = v_max / a_max + a_max / j_max;
+    double t_const  = (delta > v_max * t_accel) ? (delta - v_max * t_accel) / v_max : 0.0;
+    scurve_t_total  = 2.0 * t_accel + t_const;
 
-    if (delta > 2.0 * dist_accel) {
-        scurve_pos_has_const_vel = 1;
-        scurve_pos_t_accel = t_accel;
-        scurve_pos_t_const = (delta - 2.0 * dist_accel) / v_max;
-    } else {
-        scurve_pos_has_const_vel = 0;
-        scurve_pos_t_accel = t_accel;
-        scurve_pos_t_const = 0.0;
-    }
-    scurve_pos_t_total = 2.0 * scurve_pos_t_accel + scurve_pos_t_const;
-
-    scurve_vel_active = 0;
-    scurve_pos_active = 1;
-
-    en_position_loop = 1;
-    pos_use_accum    = 1;
-    pos_vff_gain     = 1.0;
+    scurve_active    = 1;
+    en_position_loop = 0;   // velocity mode during trajectory
+    pos_use_accum    = 1;   // needed for position hold handoff
 }
 
-void task_wolfpack_start_scurve_velocity(double target_rotations,
-                                          double v_max, double a_max, double j_max)
+int task_wolfpack_set_speed_vff_gain(double gain)
 {
-    double target_theta = target_rotations * PI2;
-
-    scurve_vel_target_theta = target_theta;
-    scurve_vel_v_max        = v_max;
-    scurve_vel_a_max        = a_max;
-    scurve_vel_j_max        = j_max;
-    scurve_vel_t            = 0.0;
-    scurve_vel_phase        = 0;
-    scurve_vel_direction    = (target_theta >= LOG_theta_m_accum) ? 1.0 : -1.0;
-
-    double delta   = fabs(target_theta - LOG_theta_m_accum);
-    double t_accel = v_max / a_max + a_max / j_max;
-    double t_const = (delta > v_max * t_accel) ? (delta - v_max * t_accel) / v_max : 0.0;
-    scurve_vel_t_total = 2.0 * t_accel + t_const;
-
-    scurve_pos_active = 0;   // stop position mode if running
-    scurve_vel_active = 1;
-
-    en_position_loop = 0;    // pure velocity mode to start
-    pos_use_accum    = 1;    // will be needed when switching to position hold
+    speed_vff_gain = gain;
+    return SUCCESS;
 }
 
 void task_wolfpack_stats_print(void)

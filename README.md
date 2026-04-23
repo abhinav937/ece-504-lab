@@ -120,17 +120,17 @@ The output of the position loop is clamped to `±pos_w_m_ref_max` (default 40 ra
 
 ## How the Speed Loop Works
 
-### PI + Acceleration Feedforward
+### PI + CFF Torque Feedforward
 
 ```
 w_error    = w_ref − w_m_filtered
 T_prop     = Kpv × w_error
-T_inte    += Kiv × w_error × Ts          (clamped to ±T_E_MAX for anti-windup)
-T_aff      = Kaff × (w_ref[k] − w_ref[k−1]) / Ts
-T_cmd      = T_prop + T_inte + T_aff
+T_inte    += Kiv × w_error × Ts                   (clamped ±T_E_MAX, anti-windup)
+T_ff       = speed_vff_gain × J × (w_ref[k] − w_ref[k−1]) × 10000
+T_cmd      = T_prop + T_inte + T_ff
 ```
 
-The **acceleration feedforward** differentiates the speed reference and scales by `Kaff` (default = `J_ESTIMATE`, the rotor inertia in kg·m²). This gives `T_aff = J × dω*/dt` — exactly the torque needed to physically accelerate the rotor at the commanded rate. The speed PI integrator does not need to wind up to find this torque; it is already supplied by feedforward. The integrator then handles only steady-state disturbances (friction, load, etc.).
+`T_ff = J × dω*/dt` is exactly the torque needed to accelerate the rotor inertia at the commanded rate. It is supplied before any error accumulates. The PI integrator then handles only friction, load disturbances, and model error. Set `speed_vff_gain = 0` to disable CFF and observe `LOG_T_e_cmd_inte` wind up during moves to see the difference.
 
 ### Anti-windup
 
@@ -155,6 +155,7 @@ The speed integrator is clamped to `±T_E_MAX = 1.5 × P × λ_pm × I_lim ≈ �
 |---|---|---|
 | `set_speed_kp <val>` | J × ω_gcf | Speed PI proportional gain [N·m·s/rad]. |
 | `set_speed_ki <val>` | B × ω_gcf | Speed PI integral gain [N·m/rad]. |
+| `set_speed_vff_gain <val>` | 1.0 | CFF torque feedforward gain. 1.0 = full inertia compensation, 0.0 = off. |
 
 ### Tuning procedure
 
@@ -180,87 +181,207 @@ These variables are available for logging (e.g., via the AMDC host interface):
 | `LOG_T_e_cmd_prop` | Speed PI proportional torque command [N·m] |
 | `LOG_T_e_cmd_inte` | Speed PI integral torque command [N·m] |
 | `LOG_T_e_cmd` | Total torque command [N·m] |
-| `LOG_scurve_progress` | S-curve normalized progress 0.0 → 1.0 |
-| `LOG_scurve_t_elapsed` | S-curve elapsed time [s] |
-| `LOG_scurve_t_total` | S-curve total planned duration [s] |
+| `LOG_scurve_progress` | CFF trajectory normalized progress 0.0 → 1.0 |
+| `LOG_scurve_t_elapsed` | CFF trajectory elapsed time [s] |
+| `LOG_scurve_t_total` | CFF trajectory total planned duration [s] |
+| `LOG_T_e_cmd_ff` | CFF torque feedforward contribution [N·m] |
 
 ---
 
-## S-Curve Trajectory
+## CFF Velocity Trajectory (Elevator Mode)
 
-The S-curve trajectory generator produces smooth, jerk-limited position or velocity profiles. It sits between the user command and the position loop — instead of stepping `LOG_theta_m_ref` directly (which would cause a jerk), it walks the reference through a shaped trajectory each ISR cycle.
+Instead of stepping the position reference to a new floor instantly (which forces the speed PI to react from a large error), the CFF trajectory:
 
-### Two methods
+1. Generates a **jerk-limited velocity profile** (raised-cosine shape) — the motor speeds up, optionally cruises at `v_max`, then decelerates smoothly to zero.
+2. Adds a **torque feedforward** term each ISR derived from the commanded acceleration — this pre-supplies the inertia torque so the PI integrator does not need to wind up.
 
-| Method | How it works | Best for |
-|--------|-------------|----------|
-| **0 — Position S-curve** (default) | Updates `LOG_theta_m_ref` each ISR using a raised-cosine shape. Position loop tracks it continuously. | Precise floor-to-floor stopping |
-| **1 — Velocity S-curve** | Commands `LOG_w_m_ref` directly using a velocity profile, then hands off to position hold near the target. | Long travel distances |
+This is the Command Feedforward (CFF) approach from ME 547 (Lorenz): `T_ff = J × dω*/dt`.
 
-### Phase structure (Method 0)
+---
 
-For a **long move** (distance > 2 × v_max × t_accel):
+### Signal flow
+
 ```
-[Accel] → [Constant velocity] → [Decel]
+  wolfpack scurve_goto 30   ← user says "go to Floor 3 (30 rotations)"
+              │
+              ▼
+  ┌─────────────────────┐   called once
+  │  start_scurve_cff() │─────────────────────────────────────────────┐
+  │  • target = 30×2π   │   computes t_accel, t_const, t_total        │
+  │  • direction = +1   │   sets scurve_active = 1                    │
+  └─────────────────────┘   en_position_loop = 0 (velocity mode)      │
+                                                                       │
+  ─────────── every ISR at 10 kHz ───────────────────────────────────  │
+              │                                                        │
+              ▼                                                        │
+  ┌─────────────────────┐                                             │
+  │  update_scurve_cff()│  raised-cosine velocity profile             │
+  │  sets LOG_w_m_ref(t)│  ← this is ω*(t)                           │
+  └──────────┬──────────┘                                             │
+             │                                                        │
+      ┌──────┴─────────────────────────┐                              │
+      │                                │                              │
+      ▼                                ▼                              │
+  ┌──────────────────┐    ┌────────────────────────────┐             │
+  │   Speed PI       │    │   CFF Torque Feedforward   │             │
+  │   T_prop + T_inte│    │   T_ff = J × Δω*/Ts        │             │
+  │   (tracks error) │    │   (inertia compensation)   │             │
+  └────────┬─────────┘    └──────────────┬─────────────┘             │
+           └──────────────┬──────────────┘                           │
+                          │                                           │
+                          ▼                                           │
+                    LOG_T_e_cmd                                       │
+                          │                                           │
+                          ▼                                           │
+               Current Loop (MTPA + PI)                              │
+                          │                                           │
+                          ▼                                           │
+                    SVPWM → Motor                                     │
+                          │                                           │
+                          ▼                                           │
+             when |target − θ_accum| < 0.5 rad:                      │
+  ┌─────────────────────────────────────┐                            │
+  │  position hold handoff              │◄───────────────────────────┘
+  │  scurve_active = 0                  │
+  │  en_position_loop = 1               │
+  │  LOG_theta_m_ref = target           │
+  └─────────────────────────────────────┘
 ```
-For a **short move** (not enough distance to reach v_max):
+
+---
+
+### Numerical example: Floor 1 → Floor 3 (30 rotations)
+
+**Command:**
 ```
-[Single raised-cosine over full distance]
+wolfpack scurve_en 1
+wolfpack scurve_goto 30
 ```
+
+#### Step 1 — Trajectory planning (`start_scurve_cff`, runs once)
+
+```
+target_theta = 30 × 2π         =  188.5 rad
+delta        = |188.5 − 0|     =  188.5 rad   (motor starts at 0)
+
+t_accel  = v_max/a_max + a_max/j_max
+         = 18/2.5   +   2.5/25
+         =  7.2     +   0.1    =   7.3 s
+
+v_max × t_accel = 18 × 7.3    = 131.4 rad
+
+delta (188.5) > 131.4  →  long move, cruise phase exists
+
+t_const  = (188.5 − 131.4) / 18  =   3.2 s
+t_total  =  2 × 7.3  +  3.2      =  17.8 s
+direction = +1  (target > current)
+```
+
+#### Step 2 — Velocity profile (`update_scurve_cff`, every 100 µs)
+
+The velocity follows a raised-cosine from 0 → `v_max` → 0 over `t_total`:
+
+```
+  ω* [rad/s]
+  18 ──────────────────────────────────
+     /                                  \
+  9 /                                    \
+   /                                      \
+  0──────────────────────────────────────── t [s]
+  0    3.6    7.3   8.9  10.5   14.2   17.8
+
+  │ accel │ cruise (3.2 s) │ decel  │
+```
+
+| Time [s] | Progress | `LOG_w_m_ref` [rad/s] | Phase |
+|----------|----------|----------------------|-------|
+| 0        | 0.00     | 0                    | start |
+| 3.6      | 0.20     | 9.0                  | accelerating |
+| 7.3      | 0.41     | 18.0                 | at v_max |
+| 8.9      | 0.50     | 18.0                 | cruise midpoint |
+| 10.5     | 0.59     | 18.0                 | start decel |
+| 14.2     | 0.80     | 9.0                  | decelerating |
+| 17.8     | 1.00     | 0                    | done → pos hold |
+
+#### Step 3 — CFF torque feedforward (every ISR, alongside speed PI)
+
+```
+T_ff = speed_vff_gain × J_ESTIMATE × (ω*[k] − ω*[k−1]) × 10 000
+     = 1.0 × 0.00427 × Δω* × 10 000
+
+Peak acceleration occurs at t ≈ 3.6 s (progress = 0.25):
+  dω*/dt  = v_max × π / t_total × sin(2π × 0.25)
+           = 18 × π / 17.8 × 1.0
+           ≈ 3.18 rad/s²
+
+  T_ff_peak  = J × dω*/dt
+             = 0.00427 × 3.18
+             ≈ 0.014 N·m   ← pre-supplied inertia torque
+
+During cruise (constant velocity):
+  dω*/dt = 0  →  T_ff = 0   ← PI handles friction/load only
+
+During decel (mirror of accel):
+  T_ff  ≈ −0.014 N·m        ← braking assist
+```
+
+**The key benefit:** `LOG_T_e_cmd_inte` stays near zero during the move. The integrator only handles friction and load disturbances; the inertia torque is already supplied by CFF.
+
+#### Step 4 — Position handoff
+
+At `t ≈ 17.3 s`, `|188.5 − LOG_theta_m_accum| < 0.5 rad`:
+- `scurve_active = 0`
+- `en_position_loop = 1`, `LOG_theta_m_ref = 188.5 rad`
+- Position PI takes over for the final precision stop
+
+---
 
 ### Commands
 
 ```
-wolfpack scurve_en <0|1>             # 0 = direct commands, 1 = route through S-curve
-wolfpack scurve_set_method <0|1>     # 0 = position S-curve, 1 = velocity S-curve
-wolfpack scurve_set_v_max <rad/s>    # default: 18.0
-wolfpack scurve_set_a_max <rad/s²>   # default: 2.5
-wolfpack scurve_set_j_max <rad/s³>   # default: 25.0
-wolfpack scurve_goto <rotations>     # explicit position S-curve (ignores scurve_method)
-wolfpack scurve_goto_vel <rotations> # explicit velocity S-curve (ignores scurve_method)
-wolfpack scurve_stop                 # abort active trajectory, hold current position
+wolfpack scurve_en <0|1>             # 0 = direct, 1 = route through CFF trajectory
+wolfpack scurve_set_v_max <rad/s>    # max velocity  (default 18.0)
+wolfpack scurve_set_a_max <rad/s²>   # max accel     (default 2.5)
+wolfpack scurve_set_j_max <rad/s³>   # max jerk      (default 25.0)
+wolfpack scurve_goto <rotations>     # CFF move to absolute rotation target
+wolfpack scurve_goto_vel <rotations> # same as scurve_goto (alias)
+wolfpack scurve_stop                 # abort trajectory, hold current position
+wolfpack set_speed_vff_gain <val>    # CFF torque FF gain (default 1.0 = full, 0 = off)
 ```
 
-When `scurve_en 1` is active, `set_theta_m_ref_abs` and `set_theta_m_ref_rel` automatically route through whichever method is selected. `set_theta_m_ref` (single-revolution wrapped mode) is unaffected.
+When `scurve_en 1`, `set_theta_m_ref_abs` and `set_theta_m_ref_rel` automatically route through the CFF trajectory. `set_theta_m_ref` (single-rev wrapped mode) is unaffected.
 
 ### Typical elevator workflow
 
 ```
 wolfpack scurve_en 1
-wolfpack scurve_set_v_max 18
-wolfpack scurve_set_a_max 2.5
-wolfpack scurve_set_j_max 25
 
-wolfpack set_theta_m_ref_abs 62.832    # Floor 1 (10 rotations = 62.832 rad) — S-curve
-wolfpack set_theta_m_ref_abs 125.664   # Floor 2 (20 rotations) — S-curve
-wolfpack set_theta_m_ref_abs 0         # Back to ground floor — S-curve
+wolfpack scurve_goto 10    # Floor 1  (10 rotations)
+wolfpack scurve_goto 30    # Floor 3  (30 rotations)
+wolfpack scurve_goto 0     # Ground floor
+
+# To compare with CFF off:
+wolfpack set_speed_vff_gain 0     # PI alone — watch LOG_T_e_cmd_inte wind up
+wolfpack set_speed_vff_gain 1     # CFF back on
 ```
 
-Or using rotation units directly:
+### Effect of `speed_vff_gain`
 
-```
-wolfpack scurve_goto 10     # Floor 1 (position method)
-wolfpack scurve_goto 20     # Floor 2
-wolfpack scurve_goto_vel 15 # Floor 1.5 (velocity method)
-```
+| Setting | Behavior |
+|---------|----------|
+| `1.0` (default) | Full inertia compensation — integrator stays small during moves |
+| `0.5` | Partial — useful if `J_ESTIMATE` is too high |
+| `0.0` | CFF off — pure PI, integrator must supply all torque |
 
 ### Conservative starting parameters
 
-| | Conservative | Normal | Aggressive |
-|---|---|---|---|
-| v_max [rad/s] | 12–15 | 18–22 | 28–35 |
-| a_max [rad/s²] | 1.5–2.0 | 2.5–3.5 | 4.0–6.0 |
-| j_max [rad/s³] | 15–20 | 25–35 | 40–60 |
+| Parameter | Conservative | Normal | Aggressive |
+|-----------|-------------|--------|------------|
+| v_max [rad/s]  | 12–15  | 18–22  | 28–35 |
+| a_max [rad/s²] | 1.5–2  | 2.5–3.5 | 4–6  |
+| j_max [rad/s³] | 15–20  | 25–35  | 40–60 |
 
-Always start conservative and increase while monitoring vibration and `LOG_i_q`.
-
-### S-curve logged variables
-
-| Variable | Description |
-|----------|-------------|
-| `LOG_scurve_progress` | Normalized trajectory progress 0.0 → 1.0 |
-| `LOG_scurve_t_elapsed` | Elapsed time in active trajectory [s] |
-| `LOG_scurve_t_total` | Planned total duration of active trajectory [s] |
+Always start conservative and increase while watching `LOG_i_q` for saturation.
 
 ---
 

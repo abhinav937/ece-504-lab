@@ -41,14 +41,14 @@ static command_help_t cmd_help[] = {
 	{ "set_ireg_kid", "Set d-axis current-loop integral gain [V/(A*s)]" },
 	{ "set_ireg_kpq", "Set q-axis current-loop proportional gain [V/A]" },
 	{ "set_ireg_kiq", "Set q-axis current-loop integral gain [V/(A*s)]" },
-	{ "scurve_en", "Enable (1) or disable (0) S-curve mode for set_theta_m_ref_abs/_rel" },
-	{ "scurve_set_method", "Set S-curve method: 0=position (Method 1), 1=velocity (Method 2)" },
+	{ "scurve_en", "Enable (1) or disable (0) CFF S-curve mode for set_theta_m_ref_abs/_rel" },
 	{ "scurve_set_v_max", "Set default S-curve max velocity [rad/s]" },
 	{ "scurve_set_a_max", "Set default S-curve max acceleration [rad/s^2]" },
 	{ "scurve_set_j_max", "Set default S-curve max jerk [rad/s^3]" },
-	{ "scurve_goto", "Position S-curve to <rotations> using current default params" },
-	{ "scurve_goto_vel", "Velocity S-curve to <rotations> using current default params" },
+	{ "scurve_goto", "CFF S-curve to <rotations> using current default params" },
+	{ "scurve_goto_vel", "CFF S-curve to <rotations> (alias for scurve_goto)" },
 	{ "scurve_stop", "Abort active S-curve and hold current position" },
+	{ "set_speed_vff_gain", "Set CFF torque feedforward gain (0=off, 1=full model-based)" },
 };
 
 
@@ -257,12 +257,6 @@ int cmd_wolfpack(int argc, char **argv)
         return CMD_SUCCESS;
     }
 
-    if (argc == 3 && STREQ("scurve_set_method", argv[1])) {
-        int m = (int)strtol(argv[2], NULL, 10);
-        if (task_wolfpack_set_scurve_method(m) != SUCCESS) return CMD_FAILURE;
-        return CMD_SUCCESS;
-    }
-
     if (argc == 3 && STREQ("scurve_set_v_max", argv[1])) {
         double v = strtod(argv[2], NULL);
         if (task_wolfpack_set_scurve_v_max(v) != SUCCESS) return CMD_FAILURE;
@@ -295,6 +289,12 @@ int cmd_wolfpack(int argc, char **argv)
 
     if (argc == 2 && STREQ("scurve_stop", argv[1])) {
         if (task_wolfpack_scurve_stop() != SUCCESS) return CMD_FAILURE;
+        return CMD_SUCCESS;
+    }
+
+    if (argc == 3 && STREQ("set_speed_vff_gain", argv[1])) {
+        double gain = strtod(argv[2], NULL);
+        if (task_wolfpack_set_speed_vff_gain(gain) != SUCCESS) return CMD_FAILURE;
         return CMD_SUCCESS;
     }
 
