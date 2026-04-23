@@ -134,6 +134,7 @@ double LOG_pos_Error_Prop = 0;         // Position-loop proportional term [rad/s
 double LOG_pos_Error_Integral = 0;     // Position-loop integrated error [rad*s]
 int en_position_loop = 0;              // 1 = position loop generates speed reference
 int pos_use_accum = 0;                 // 0 = single-rev wrapped (LOG_theta_m), 1 = multi-turn absolute (LOG_theta_m_accum)
+int pos_single_rev_dir = 1;            // 1 = CW (positive input), -1 = CCW (negative input)
 double pos_reg_kp = POS_REG_KP_DEFAULT;
 double pos_reg_ki = POS_REG_KI_DEFAULT;
 double pos_w_m_ref_max = POS_W_M_REF_MAX_DEFAULT;
@@ -411,6 +412,7 @@ void task_wolfpack_callback(void *arg)
 		LOG_pos_Error_Integral = 0;
 		en_position_loop = 0;
 		pos_use_accum = 0;
+		pos_single_rev_dir = 1;
 		pos_w_m_ref_inte = 0;
 		theta_m_ref_prev = LOG_theta_m_ref;
 		LOG_w_m_vff = 0;
@@ -502,15 +504,20 @@ void task_wolfpack_callback(void *arg)
 	    LOG_theta_m_error = LOG_theta_m_ref - theta_fb;
 
 	    if (!pos_use_accum) {
-	        // Singl--rev: shortest path
-	        while (LOG_theta_m_error >  PI) LOG_theta_m_error -= PI2;
-	        while (LOG_theta_m_error < -PI) LOG_theta_m_error += PI2;
+	        // Single-rev: direction set by sign of the original command
+	        if (pos_single_rev_dir > 0) {
+	            // CW — keep error positive (wrap up if target is "behind")
+	            if (LOG_theta_m_error < 0.0) LOG_theta_m_error += PI2;
+	        } else {
+	            // CCW — keep error negative (wrap down if target is "ahead")
+	            if (LOG_theta_m_error > 0.0) LOG_theta_m_error -= PI2;
+	        }
 	    }
 
 	    LOG_pos_Error_Prop = pos_reg_kp * LOG_theta_m_error;
 
 	    // Velocity feedforward
-	    LOG_w_m_vff = pos_vff_gain * (LOG_theta_m_ref) * TASK_WOLFPACK_UPDATES_PER_SEC;
+	    LOG_w_m_vff = pos_vff_gain * (LOG_theta_m_ref - theta_m_ref_prev) * TASK_WOLFPACK_UPDATES_PER_SEC;
 
 	    // Tentative integral update
 	    double tentative_inte = pos_w_m_ref_inte + pos_reg_ki * LOG_theta_m_error * Ts;
@@ -731,18 +738,19 @@ int task_wolfpack_set_w_m_ref(double w)
     return SUCCESS;
 }
 
-// Single-revolution wrapped mode: reference in [0, 2π), shortest-path routing.
+// Single-revolution wrapped mode: sign of theta sets rotation direction.
+// Positive theta → CW to that angle. Negative theta → CCW to that angle.
 int task_wolfpack_set_theta_m_ref(double theta)
 {
-    LOG_T_e_cmd_inte = 0;  // reset speed integrator to prevent bump on mode switch
+    LOG_T_e_cmd_inte = 0;
     LOG_pos_Error_Prop = 0;
     LOG_pos_Error_Integral = 0;
     pos_w_m_ref_inte = 0;
     pos_use_accum = 0;
+    pos_single_rev_dir = (theta >= 0.0) ? 1 : -1;
     en_position_loop = 1;
-    LOG_theta_m_ref = fmod(theta, PI2);
-    if (LOG_theta_m_ref < 0.0) LOG_theta_m_ref += PI2;
-    theta_m_ref_prev = LOG_theta_m_ref;  // sync prev so first FF delta is zero, not stale
+    LOG_theta_m_ref = fmod(fabs(theta), PI2);  // target is always in [0, 2π)
+    theta_m_ref_prev = LOG_theta_m_ref;
     return SUCCESS;
 }
 
@@ -938,7 +946,7 @@ void task_wolfpack_start_scurve_cff(double target_rotations,
     scurve_direction    = (target_theta >= LOG_theta_m_accum) ? 1.0 : -1.0;
 
     double t_accel  = v_max / a_max + a_max / j_max;
-    double t_const  = (delta > v_max * t_accel) ? (delta - v_max * t_accel) / v_max : 0.0;
+    double t_const  = (delta > v_max * t_accel) ? 2.0 * (delta - v_max * t_accel) / v_max : 0.0;
     scurve_t_total  = 2.0 * t_accel + t_const;
 
     scurve_active    = 1;
