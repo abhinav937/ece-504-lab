@@ -223,6 +223,127 @@ double LOG_control_runtime = 0;
 static uint32_t last_now_start = 0;
 static task_control_block_t tcb;  			// Scheduler TCB which holds task "context"
 
+// ==================== S-CURVE GLOBAL ENABLE + DEFAULT PARAMS ====================
+int    scurve_en = 0;              // 1 = route set_theta_m_ref_abs/_rel through S-curve
+int    scurve_method = 0;          // 0 = position S-curve (Method 1), 1 = velocity S-curve (Method 2)
+double scurve_default_v_max = 18.0;   // [rad/s]
+double scurve_default_a_max =  2.5;   // [rad/s^2]
+double scurve_default_j_max = 25.0;   // [rad/s^3]
+
+// ==================== METHOD 1: POSITION S-CURVE ====================
+int    scurve_pos_active = 0;
+double scurve_pos_t = 0.0;
+double scurve_pos_t_total = 0.0;
+double scurve_pos_t_accel = 0.0;   // duration of each accel/decel phase [s]
+double scurve_pos_t_const = 0.0;   // duration of constant-velocity phase [s]
+int    scurve_pos_has_const_vel = 0; // 1 = move is long enough for cruise phase
+double scurve_pos_theta_start = 0.0;
+double scurve_pos_theta_target = 0.0;
+double scurve_pos_v_max = 0.0;
+double scurve_pos_a_max = 0.0;
+double scurve_pos_j_max = 0.0;
+
+// ==================== METHOD 2: VELOCITY S-CURVE ====================
+int    scurve_vel_active = 0;
+double scurve_vel_t = 0.0;
+double scurve_vel_t_total = 0.0;
+double scurve_vel_target_theta = 0.0;
+double scurve_vel_v_max = 0.0;
+double scurve_vel_a_max = 0.0;
+double scurve_vel_j_max = 0.0;
+int    scurve_vel_phase = 0;
+double scurve_vel_direction = 1.0;
+
+// ==================== S-CURVE LOGGING VARIABLES ====================
+double LOG_scurve_progress  = 0.0;  // normalized 0–1 progress of active trajectory
+double LOG_scurve_t_elapsed = 0.0;  // elapsed time of active trajectory [s]
+double LOG_scurve_t_total   = 0.0;  // total planned duration of active trajectory [s]
+
+static void update_scurve_position_reference(void)
+{
+    scurve_pos_t += Ts;
+
+    LOG_scurve_t_elapsed = scurve_pos_t;
+    LOG_scurve_t_total   = scurve_pos_t_total;
+
+    if (scurve_pos_t >= scurve_pos_t_total) {
+        LOG_theta_m_ref     = scurve_pos_theta_target;
+        scurve_pos_active   = 0;
+        LOG_scurve_progress = 1.0;
+        return;
+    }
+
+    LOG_scurve_progress = scurve_pos_t / scurve_pos_t_total;
+
+    double theta_ref;
+    double ta = scurve_pos_t_accel;
+    double tc = scurve_pos_t_const;
+    double vm = scurve_pos_v_max;
+
+    if (scurve_pos_has_const_vel) {
+        if (scurve_pos_t < ta) {
+            // Acceleration phase: raised-cosine ramp 0 → vm*ta
+            double p = scurve_pos_t / ta;
+            double s = 0.5 - 0.5 * cos(PI * p);
+            theta_ref = scurve_pos_theta_start + (vm * ta) * s;
+        } else if (scurve_pos_t < ta + tc) {
+            // Constant velocity phase
+            double t_in = scurve_pos_t - ta;
+            theta_ref = scurve_pos_theta_start + (vm * ta) + (vm * t_in);
+        } else {
+            // Deceleration phase: raised-cosine ramp vm*ta → 0 from target
+            double t_in = scurve_pos_t - ta - tc;
+            double p = t_in / ta;
+            double s = 0.5 + 0.5 * cos(PI * p);
+            theta_ref = scurve_pos_theta_target - (vm * ta) * s;
+        }
+    } else {
+        // Short move: single raised-cosine over full distance
+        double p = scurve_pos_t / scurve_pos_t_total;
+        double s = 0.5 - 0.5 * cos(PI * p);
+        theta_ref = scurve_pos_theta_start +
+                    (scurve_pos_theta_target - scurve_pos_theta_start) * s;
+    }
+
+    LOG_theta_m_ref = theta_ref;
+}
+
+static void update_scurve_velocity_reference(void)
+{
+    scurve_vel_t += Ts;
+
+    LOG_scurve_t_elapsed = scurve_vel_t;
+    LOG_scurve_t_total   = scurve_vel_t_total;
+
+    double progress = scurve_vel_t / scurve_vel_t_total;
+    LOG_scurve_progress = progress;
+
+    double v_cmd = 0.0;
+    if (progress < 0.5) {
+        double s = 0.5 - 0.5 * cos(PI2 * progress);
+        v_cmd = scurve_vel_v_max * s;
+    } else {
+        double s = 0.5 + 0.5 * cos(PI2 * (progress - 0.5));
+        v_cmd = scurve_vel_v_max * s;
+    }
+
+    LOG_w_m_ref = scurve_vel_direction * v_cmd;
+
+    // Switch to position hold near target for precise stop
+    double remaining = fabs(scurve_vel_target_theta - LOG_theta_m_accum);
+    if (remaining < 0.5 && scurve_vel_phase < 3) {
+        task_wolfpack_set_theta_m_ref_abs(scurve_vel_target_theta);
+        scurve_vel_active   = 0;
+        scurve_vel_phase    = 3;
+        LOG_scurve_progress = 1.0;
+        return;
+    }
+
+    if (scurve_vel_t >= scurve_vel_t_total) {
+        scurve_vel_active = 0;
+    }
+}
+
 int task_wolfpack_init(void)
 {
     if (scheduler_tcb_is_registered(&tcb)) {
@@ -352,6 +473,12 @@ void task_wolfpack_callback(void *arg)
 		pos_w_m_ref_inte = 0;
 		theta_m_ref_prev = LOG_theta_m_ref;
 		LOG_w_m_vff = 0;
+		scurve_pos_active        = 0;
+		scurve_pos_has_const_vel = 0;
+		scurve_vel_active        = 0;
+		LOG_scurve_progress  = 0.0;
+		LOG_scurve_t_elapsed = 0.0;
+		LOG_scurve_t_total   = 0.0;
 		LOG_T_e_cmd_prop = 0;
 		LOG_T_e_cmd_inte = 0;
 		LOG_T_e_cmd = 0;
@@ -385,6 +512,14 @@ void task_wolfpack_callback(void *arg)
 		{
 			LOG_wolf_state = 1;
 		}
+		// === S-CURVE TRAJECTORY UPDATES ===
+		if (scurve_pos_active) {
+			update_scurve_position_reference();
+		}
+		if (scurve_vel_active) {
+			update_scurve_velocity_reference();
+		}
+
 		LOG_pwm_state = pwm_enable();				// Enable PWMs
 		break;
 
@@ -437,7 +572,7 @@ void task_wolfpack_callback(void *arg)
 	    LOG_pos_Error_Prop = pos_reg_kp * LOG_theta_m_error;
 
 	    // Velocity feedforward
-	    LOG_w_m_vff = pos_vff_gain * (LOG_theta_m_ref - theta_m_ref_prev) * TASK_WOLFPACK_UPDATES_PER_SEC;
+	    LOG_w_m_vff = pos_vff_gain * (LOG_theta_m_ref) * TASK_WOLFPACK_UPDATES_PER_SEC;
 
 	    // Tentative integral update
 	    double tentative_inte = pos_w_m_ref_inte + pos_reg_ki * LOG_theta_m_error * Ts;
@@ -669,32 +804,62 @@ int task_wolfpack_set_theta_m_ref(double theta)
 
 // Multi-turn absolute mode: theta is the target angle in radians from the encoder power-on zero.
 // e.g. set_theta_m_ref_abs(0) -> go to encoder zero, set_theta_m_ref_abs(10*PI) -> go to 5 full CW turns.
+// When scurve_en=1, routes through S-curve position trajectory instead of stepping directly.
 int task_wolfpack_set_theta_m_ref_abs(double theta)
 {
-    LOG_T_e_cmd_inte = 0;  // reset speed integrator to prevent bump on mode switch
+    if (scurve_en) {
+        if (scurve_method == 1)
+            task_wolfpack_start_scurve_velocity(theta / PI2,
+                                                scurve_default_v_max,
+                                                scurve_default_a_max,
+                                                scurve_default_j_max);
+        else
+            task_wolfpack_start_scurve_position(theta / PI2,
+                                                scurve_default_v_max,
+                                                scurve_default_a_max,
+                                                scurve_default_j_max);
+        return SUCCESS;
+    }
+    LOG_T_e_cmd_inte = 0;
     LOG_pos_Error_Prop = 0;
     LOG_pos_Error_Integral = 0;
     pos_w_m_ref_inte = 0;
     pos_use_accum = 1;
     en_position_loop = 1;
     LOG_theta_m_ref = theta;
-    theta_m_ref_prev = LOG_theta_m_ref;  // sync prev so first FF delta is zero, not stale
+    theta_m_ref_prev = LOG_theta_m_ref;
     return SUCCESS;
 }
 
 // Multi-turn relative mode: adds delta_theta to the current reference.
 // Calling this twice with 5π gives the same endpoint as calling once with 10π.
 // First call from non-accum mode anchors reference to current accumulated position first.
+// When scurve_en=1, routes through S-curve position trajectory instead of stepping directly.
 int task_wolfpack_set_theta_m_ref_rel(double delta_theta)
 {
+    if (scurve_en) {
+        double abs_target = scurve_pos_active ? scurve_pos_theta_target
+                                              : LOG_theta_m_accum;
+        double rot = (abs_target + delta_theta) / PI2;
+        if (scurve_method == 1)
+            task_wolfpack_start_scurve_velocity(rot,
+                                                scurve_default_v_max,
+                                                scurve_default_a_max,
+                                                scurve_default_j_max);
+        else
+            task_wolfpack_start_scurve_position(rot,
+                                                scurve_default_v_max,
+                                                scurve_default_a_max,
+                                                scurve_default_j_max);
+        return SUCCESS;
+    }
     LOG_pos_Error_Prop = 0;
     LOG_pos_Error_Integral = 0;
     pos_w_m_ref_inte = 0;
     if (!en_position_loop || !pos_use_accum) {
-        // Entering relative mode fresh: anchor to current position so delta is from here.
         LOG_T_e_cmd_inte = 0;
         LOG_theta_m_ref = LOG_theta_m_accum;
-        theta_m_ref_prev = LOG_theta_m_accum;  // sync prev to avoid stale FF spike on first move
+        theta_m_ref_prev = LOG_theta_m_accum;
     }
     pos_use_accum = 1;
     en_position_loop = 1;
@@ -771,6 +936,132 @@ int task_wolfpack_set_ireg_kiq(double ki)
 }
 
 
+
+// ==================== S-CURVE ENABLE / PARAM SETTERS ====================
+
+int task_wolfpack_set_scurve_en(int en)
+{
+    scurve_en = (en != 0);
+    return SUCCESS;
+}
+
+int task_wolfpack_set_scurve_method(int method)
+{
+    if (method != 0 && method != 1) return FAILURE;
+    scurve_method = method;
+    return SUCCESS;
+}
+
+int task_wolfpack_set_scurve_v_max(double v)
+{
+    if (v <= 0.0) return FAILURE;
+    scurve_default_v_max = v;
+    return SUCCESS;
+}
+
+int task_wolfpack_set_scurve_a_max(double a)
+{
+    if (a <= 0.0) return FAILURE;
+    scurve_default_a_max = a;
+    return SUCCESS;
+}
+
+int task_wolfpack_set_scurve_j_max(double j)
+{
+    if (j <= 0.0) return FAILURE;
+    scurve_default_j_max = j;
+    return SUCCESS;
+}
+
+int task_wolfpack_scurve_stop(void)
+{
+    scurve_pos_active = 0;
+    scurve_vel_active = 0;
+    // Hold wherever the motor is right now
+    task_wolfpack_set_theta_m_ref_abs(LOG_theta_m_accum);
+    return SUCCESS;
+}
+
+// ==================== S-CURVE GOTO WRAPPERS (use stored defaults) ====================
+
+void task_wolfpack_scurve_goto(double target_rotations)
+{
+    task_wolfpack_start_scurve_position(target_rotations,
+                                        scurve_default_v_max,
+                                        scurve_default_a_max,
+                                        scurve_default_j_max);
+}
+
+void task_wolfpack_scurve_goto_vel(double target_rotations)
+{
+    task_wolfpack_start_scurve_velocity(target_rotations,
+                                        scurve_default_v_max,
+                                        scurve_default_a_max,
+                                        scurve_default_j_max);
+}
+
+// ==================== S-CURVE STARTERS ====================
+
+void task_wolfpack_start_scurve_position(double target_rotations,
+                                          double v_max, double a_max, double j_max)
+{
+    double target_theta = target_rotations * PI2;
+    double delta = fabs(target_theta - LOG_theta_m_accum);
+    if (delta < 0.01) return;   // ignore moves smaller than ~0.01 rad
+
+    scurve_pos_theta_start  = LOG_theta_m_accum;
+    scurve_pos_theta_target = target_theta;
+    scurve_pos_v_max        = v_max;
+    scurve_pos_a_max        = a_max;
+    scurve_pos_j_max        = j_max;
+    scurve_pos_t            = 0.0;
+
+    double t_accel   = a_max / j_max + v_max / a_max;   // duration of one accel phase
+    double dist_accel = v_max * t_accel;                 // distance covered per phase
+
+    if (delta > 2.0 * dist_accel) {
+        scurve_pos_has_const_vel = 1;
+        scurve_pos_t_accel = t_accel;
+        scurve_pos_t_const = (delta - 2.0 * dist_accel) / v_max;
+    } else {
+        scurve_pos_has_const_vel = 0;
+        scurve_pos_t_accel = t_accel;
+        scurve_pos_t_const = 0.0;
+    }
+    scurve_pos_t_total = 2.0 * scurve_pos_t_accel + scurve_pos_t_const;
+
+    scurve_vel_active = 0;
+    scurve_pos_active = 1;
+
+    en_position_loop = 1;
+    pos_use_accum    = 1;
+    pos_vff_gain     = 1.0;
+}
+
+void task_wolfpack_start_scurve_velocity(double target_rotations,
+                                          double v_max, double a_max, double j_max)
+{
+    double target_theta = target_rotations * PI2;
+
+    scurve_vel_target_theta = target_theta;
+    scurve_vel_v_max        = v_max;
+    scurve_vel_a_max        = a_max;
+    scurve_vel_j_max        = j_max;
+    scurve_vel_t            = 0.0;
+    scurve_vel_phase        = 0;
+    scurve_vel_direction    = (target_theta >= LOG_theta_m_accum) ? 1.0 : -1.0;
+
+    double delta   = fabs(target_theta - LOG_theta_m_accum);
+    double t_accel = v_max / a_max + a_max / j_max;
+    double t_const = (delta > v_max * t_accel) ? (delta - v_max * t_accel) / v_max : 0.0;
+    scurve_vel_t_total = 2.0 * t_accel + t_const;
+
+    scurve_pos_active = 0;   // stop position mode if running
+    scurve_vel_active = 1;
+
+    en_position_loop = 0;    // pure velocity mode to start
+    pos_use_accum    = 1;    // will be needed when switching to position hold
+}
 
 void task_wolfpack_stats_print(void)
 {

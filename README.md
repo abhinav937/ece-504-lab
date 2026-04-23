@@ -180,6 +180,87 @@ These variables are available for logging (e.g., via the AMDC host interface):
 | `LOG_T_e_cmd_prop` | Speed PI proportional torque command [N·m] |
 | `LOG_T_e_cmd_inte` | Speed PI integral torque command [N·m] |
 | `LOG_T_e_cmd` | Total torque command [N·m] |
+| `LOG_scurve_progress` | S-curve normalized progress 0.0 → 1.0 |
+| `LOG_scurve_t_elapsed` | S-curve elapsed time [s] |
+| `LOG_scurve_t_total` | S-curve total planned duration [s] |
+
+---
+
+## S-Curve Trajectory
+
+The S-curve trajectory generator produces smooth, jerk-limited position or velocity profiles. It sits between the user command and the position loop — instead of stepping `LOG_theta_m_ref` directly (which would cause a jerk), it walks the reference through a shaped trajectory each ISR cycle.
+
+### Two methods
+
+| Method | How it works | Best for |
+|--------|-------------|----------|
+| **0 — Position S-curve** (default) | Updates `LOG_theta_m_ref` each ISR using a raised-cosine shape. Position loop tracks it continuously. | Precise floor-to-floor stopping |
+| **1 — Velocity S-curve** | Commands `LOG_w_m_ref` directly using a velocity profile, then hands off to position hold near the target. | Long travel distances |
+
+### Phase structure (Method 0)
+
+For a **long move** (distance > 2 × v_max × t_accel):
+```
+[Accel] → [Constant velocity] → [Decel]
+```
+For a **short move** (not enough distance to reach v_max):
+```
+[Single raised-cosine over full distance]
+```
+
+### Commands
+
+```
+wolfpack scurve_en <0|1>             # 0 = direct commands, 1 = route through S-curve
+wolfpack scurve_set_method <0|1>     # 0 = position S-curve, 1 = velocity S-curve
+wolfpack scurve_set_v_max <rad/s>    # default: 18.0
+wolfpack scurve_set_a_max <rad/s²>   # default: 2.5
+wolfpack scurve_set_j_max <rad/s³>   # default: 25.0
+wolfpack scurve_goto <rotations>     # explicit position S-curve (ignores scurve_method)
+wolfpack scurve_goto_vel <rotations> # explicit velocity S-curve (ignores scurve_method)
+wolfpack scurve_stop                 # abort active trajectory, hold current position
+```
+
+When `scurve_en 1` is active, `set_theta_m_ref_abs` and `set_theta_m_ref_rel` automatically route through whichever method is selected. `set_theta_m_ref` (single-revolution wrapped mode) is unaffected.
+
+### Typical elevator workflow
+
+```
+wolfpack scurve_en 1
+wolfpack scurve_set_v_max 18
+wolfpack scurve_set_a_max 2.5
+wolfpack scurve_set_j_max 25
+
+wolfpack set_theta_m_ref_abs 62.832    # Floor 1 (10 rotations = 62.832 rad) — S-curve
+wolfpack set_theta_m_ref_abs 125.664   # Floor 2 (20 rotations) — S-curve
+wolfpack set_theta_m_ref_abs 0         # Back to ground floor — S-curve
+```
+
+Or using rotation units directly:
+
+```
+wolfpack scurve_goto 10     # Floor 1 (position method)
+wolfpack scurve_goto 20     # Floor 2
+wolfpack scurve_goto_vel 15 # Floor 1.5 (velocity method)
+```
+
+### Conservative starting parameters
+
+| | Conservative | Normal | Aggressive |
+|---|---|---|---|
+| v_max [rad/s] | 12–15 | 18–22 | 28–35 |
+| a_max [rad/s²] | 1.5–2.0 | 2.5–3.5 | 4.0–6.0 |
+| j_max [rad/s³] | 15–20 | 25–35 | 40–60 |
+
+Always start conservative and increase while monitoring vibration and `LOG_i_q`.
+
+### S-curve logged variables
+
+| Variable | Description |
+|----------|-------------|
+| `LOG_scurve_progress` | Normalized trajectory progress 0.0 → 1.0 |
+| `LOG_scurve_t_elapsed` | Elapsed time in active trajectory [s] |
+| `LOG_scurve_t_total` | Planned total duration of active trajectory [s] |
 
 ---
 

@@ -41,5 +41,23 @@ double compute_log_dt(double current);
 void task_controller_stats_print(void);
 void task_controller_stats_reset(void);
 
+// S-curve enable/disable and parameter setters
+int task_wolfpack_set_scurve_en(int en);
+int task_wolfpack_set_scurve_method(int method);  // 0=position S-curve, 1=velocity S-curve
+int task_wolfpack_set_scurve_v_max(double v);
+int task_wolfpack_set_scurve_a_max(double a);
+int task_wolfpack_set_scurve_j_max(double j);
+int task_wolfpack_scurve_stop(void);
+
+// S-curve goto helpers (use stored default params)
+void task_wolfpack_scurve_goto(double target_rotations);
+void task_wolfpack_scurve_goto_vel(double target_rotations);
+
+// S-curve trajectory starters (explicit, bypass scurve_en flag)
+void task_wolfpack_start_scurve_position(double target_rotations,
+                                          double v_max, double a_max, double j_max);
+void task_wolfpack_start_scurve_velocity(double target_rotations,
+                                          double v_max, double a_max, double j_max);
+
 
 #endif // TASK_WOLFPACK_H
