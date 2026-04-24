@@ -130,11 +130,12 @@ double LOG_theta_e_ref_frame = 0;		// Angle to be used in Park Transformations
 double LOG_theta_m_accum = 0;          // Unwrapped mechanical angle [rad]
 double LOG_theta_m_ref = 0;            // Mechanical position reference [rad]
 double LOG_theta_m_error = 0;          // Position error [rad]
+double LOG_theta_m_fb = 0;             // Active position feedback used by the regulator [rad]
+int LOG_pos_use_accum = 0;             // Logged selector: 0=wrapped, 1=accum
 double LOG_pos_Error_Prop = 0;         // Position-loop proportional term [rad/s]
 double LOG_pos_Error_Integral = 0;     // Position-loop integrated error [rad*s]
 int en_position_loop = 0;              // 1 = position loop generates speed reference
 int pos_use_accum = 0;                 // 0 = single-rev wrapped (LOG_theta_m), 1 = multi-turn absolute (LOG_theta_m_accum)
-int pos_single_rev_dir = 1;            // 1 = CW (positive input), -1 = CCW (negative input)
 double pos_reg_kp = POS_REG_KP_DEFAULT;
 double pos_reg_ki = POS_REG_KI_DEFAULT;
 double pos_w_m_ref_max = POS_W_M_REF_MAX_DEFAULT;
@@ -247,6 +248,21 @@ static double w_m_ref_prev = 0.0;  // Previous velocity reference for derivative
 double LOG_scurve_progress  = 0.0;  // normalized 0–1 progress of active trajectory
 double LOG_scurve_t_elapsed = 0.0;  // elapsed time of active trajectory [s]
 double LOG_scurve_t_total   = 0.0;  // total planned duration of active trajectory [s]
+static int theta_feedback_initialized = 0;
+
+static void reset_position_mode_state(void)
+{
+	LOG_T_e_cmd_prop = 0.0;
+	LOG_T_e_cmd_inte = 0.0;
+	LOG_T_e_cmd_ff = 0.0;
+	LOG_T_e_cmd = 0.0;
+	LOG_pos_Error_Prop = 0.0;
+	LOG_pos_Error_Integral = 0.0;
+	pos_w_m_ref_inte = 0.0;
+	LOG_w_m_ref = 0.0;
+	LOG_w_m_vff = 0.0;
+	w_m_ref_prev = 0.0;
+}
 
 static void update_scurve_cff(void)
 {
@@ -291,6 +307,7 @@ int task_wolfpack_init(void)
     if (scheduler_tcb_is_registered(&tcb)) {
         return FAILURE;
     }
+    theta_feedback_initialized = 0;
     // Fill TCB with parameters
     scheduler_tcb_init(&tcb, task_wolfpack_callback, NULL, "wolfpack", TASK_WOLFPACK_INTERVAL_USEC);
 
@@ -335,6 +352,14 @@ void task_wolfpack_callback(void *arg)
 	LOG_theta_m = fmod(LOG_theta_m, PI2); 							// Wrap theta_m to 0 to 2*PI;
 	LOG_theta_e = LOG_theta_m * POLE_PAIRS;							// Convert from mechanical to electrical angle
 	LOG_theta_e = fmod(LOG_theta_e + PI2, PI2);  					// Wrap theta_e to 0 to 2*PI;
+
+	if (!theta_feedback_initialized) {
+		theta_m_prev = LOG_theta_m;
+		LOG_theta_m_accum = LOG_theta_m;
+		LOG_theta_m_fb = LOG_theta_m;
+		theta_m_ref_prev = LOG_theta_m;
+		theta_feedback_initialized = 1;
+	}
 
 	// ********** Logic to ensure change in theta_m (delta_theta_m) is bound between + and - PI when rolling over. **************
 	LOG_delta_theta_m = LOG_theta_m - theta_m_prev;					// Logic to properly deal with roll-over of increment in angle
@@ -408,11 +433,12 @@ void task_wolfpack_callback(void *arg)
 		LOG_w_m_ref = 0;				// Clear speed reference and speed PI states
 		LOG_theta_m_ref = LOG_theta_m;   // absolute position wrt Z-pulse
 		LOG_theta_m_error = 0;
+		LOG_theta_m_fb = LOG_theta_m;
+		LOG_pos_use_accum = 0;
 		LOG_pos_Error_Prop = 0;
 		LOG_pos_Error_Integral = 0;
 		en_position_loop = 0;
 		pos_use_accum = 0;
-		pos_single_rev_dir = 1;
 		pos_w_m_ref_inte = 0;
 		theta_m_ref_prev = LOG_theta_m_ref;
 		LOG_w_m_vff = 0;
@@ -501,49 +527,39 @@ void task_wolfpack_callback(void *arg)
 	// ==================== POSITION REGULATOR ====================
 	if (en_position_loop) {
 	    double theta_fb = pos_use_accum ? LOG_theta_m_accum : LOG_theta_m;
+	    LOG_theta_m_fb = theta_fb;
+	    LOG_pos_use_accum = pos_use_accum;
 	    LOG_theta_m_error = LOG_theta_m_ref - theta_fb;
 
 	    if (!pos_use_accum) {
-	        // Single-rev: direction set by sign of the original command
-	        if (pos_single_rev_dir > 0) {
-	            // CW — keep error positive (wrap up if target is "behind")
-	            if (LOG_theta_m_error < 0.0) LOG_theta_m_error += PI2;
-	        } else {
-	            // CCW — keep error negative (wrap down if target is "ahead")
-	            if (LOG_theta_m_error > 0.0) LOG_theta_m_error -= PI2;
-	        }
+	        // Single-rev: shortest path (this is what works in your old code)
+	        while (LOG_theta_m_error > PI) LOG_theta_m_error -= PI2;
+	        while (LOG_theta_m_error < -PI) LOG_theta_m_error += PI2;
 	    }
 
 	    LOG_pos_Error_Prop = pos_reg_kp * LOG_theta_m_error;
-
-	    // Velocity feedforward
 	    LOG_w_m_vff = pos_vff_gain * (LOG_theta_m_ref - theta_m_ref_prev) * TASK_WOLFPACK_UPDATES_PER_SEC;
 
-	    // Tentative integral update
 	    double tentative_inte = pos_w_m_ref_inte + pos_reg_ki * LOG_theta_m_error * Ts;
-
 	    double pi_output_unsat = LOG_pos_Error_Prop + tentative_inte + LOG_w_m_vff;
 
-	    // Conditional integration (anti-windup)
 	    if (!((pi_output_unsat >= pos_w_m_ref_max && LOG_theta_m_error > 0.0) ||
 	          (pi_output_unsat <= -pos_w_m_ref_max && LOG_theta_m_error < 0.0))) {
 	        pos_w_m_ref_inte = tentative_inte;
-
-	        // Optional: clamp the integrator state itself
 	        if (pos_w_m_ref_inte > pos_w_m_ref_max)  pos_w_m_ref_inte = pos_w_m_ref_max;
 	        if (pos_w_m_ref_inte < -pos_w_m_ref_max) pos_w_m_ref_inte = -pos_w_m_ref_max;
 	    }
 	    LOG_pos_Error_Integral = pos_w_m_ref_inte;
 
-	    // Final speed command
 	    LOG_w_m_ref = LOG_pos_Error_Prop + pos_w_m_ref_inte + LOG_w_m_vff;
 
-	    // Output saturation
 	    if (LOG_w_m_ref > pos_w_m_ref_max)  LOG_w_m_ref = pos_w_m_ref_max;
 	    if (LOG_w_m_ref < -pos_w_m_ref_max) LOG_w_m_ref = -pos_w_m_ref_max;
 	}
 	else {
 	    LOG_theta_m_error   = 0;
+	    LOG_theta_m_fb      = pos_use_accum ? LOG_theta_m_accum : LOG_theta_m;
+	    LOG_pos_use_accum   = pos_use_accum;
 	    LOG_pos_Error_Prop  = 0;
 	    LOG_w_m_vff         = 0;
 	    // (Do NOT clear pos_w_m_ref_inte here - only clear on mode exit in IDLE)
@@ -566,13 +582,21 @@ void task_wolfpack_callback(void *arg)
 	if      (LOG_T_e_cmd_inte >  T_E_MAX) LOG_T_e_cmd_inte =  T_E_MAX;
 	else if (LOG_T_e_cmd_inte < -T_E_MAX) LOG_T_e_cmd_inte = -T_E_MAX;
 
-	// CFF torque feedforward: T_ff = J * d(w_ref)/dt
-	LOG_T_e_cmd_ff = speed_vff_gain * J_ESTIMATE
-	                 * (LOG_w_m_ref - w_m_ref_prev)
-	                 * TASK_WOLFPACK_UPDATES_PER_SEC;
+	// Only apply acceleration feedforward during an active CFF trajectory.
+	// A direct position step makes w_ref jump in one sample, which would otherwise
+	// create a non-physical torque impulse.
+	if (scurve_active) {
+		LOG_T_e_cmd_ff = speed_vff_gain * J_ESTIMATE
+		                 * (LOG_w_m_ref - w_m_ref_prev)
+		                 * TASK_WOLFPACK_UPDATES_PER_SEC;
+	} else {
+		LOG_T_e_cmd_ff = 0.0;
+	}
 	w_m_ref_prev = LOG_w_m_ref;
 
 	LOG_T_e_cmd = LOG_T_e_cmd_prop + LOG_T_e_cmd_inte + LOG_T_e_cmd_ff;
+	if      (LOG_T_e_cmd >  T_E_MAX) LOG_T_e_cmd =  T_E_MAX;
+	else if (LOG_T_e_cmd < -T_E_MAX) LOG_T_e_cmd = -T_E_MAX;
 
 	// Lab 4-1 Prelab 5: Compute i_s_ref from torque command for MTPA
 	// T_e = (3/2) * P * lambda_pm * i_s  =>  i_s_ref = T_e_cmd / (1.5 * P * lambda_pm)
@@ -701,6 +725,7 @@ void task_wolfpack_sm_calibrate(void)
 {
 	sm_request_calibrate = 1;
 	calibrate_status = 0;
+	theta_feedback_initialized = 0;
 }
 
 void task_wolfpack_sm_trip_clear(void)
@@ -728,6 +753,7 @@ int task_wolfpack_set_i_d_ref_manual(double i)
 
 int task_wolfpack_set_w_m_ref(double w)
 {
+	reset_position_mode_state();
 	LOG_T_e_cmd_inte = 0;  // reset integrator — prevents torque bump when exiting position mode
 	en_position_loop = 0;
 	pos_use_accum = 0;
@@ -735,22 +761,36 @@ int task_wolfpack_set_w_m_ref(double w)
 	LOG_pos_Error_Integral = 0;
 	pos_w_m_ref_inte = 0;
 	LOG_w_m_ref = w;
+	w_m_ref_prev = w;
     return SUCCESS;
 }
 
-// Single-revolution wrapped mode: sign of theta sets rotation direction.
+// Single-revolution wrapped mode: theta is wrapped to [0, 2*pi).
 // Positive theta → CW to that angle. Negative theta → CCW to that angle.
 int task_wolfpack_set_theta_m_ref(double theta)
 {
+    reset_position_mode_state();
+    {
+        double theta_wrapped = fmod(theta, PI2);
+        if (theta_wrapped < 0.0) theta_wrapped += PI2;
+        pos_use_accum = 0;
+        en_position_loop = 1;
+        LOG_theta_m_ref = theta_wrapped;
+        theta_m_ref_prev = LOG_theta_m_ref;
+        LOG_theta_m_fb = LOG_theta_m;
+        LOG_pos_use_accum = 0;
+        return SUCCESS;
+    }
     LOG_T_e_cmd_inte = 0;
     LOG_pos_Error_Prop = 0;
     LOG_pos_Error_Integral = 0;
     pos_w_m_ref_inte = 0;
     pos_use_accum = 0;
-    pos_single_rev_dir = (theta >= 0.0) ? 1 : -1;
     en_position_loop = 1;
     LOG_theta_m_ref = fmod(fabs(theta), PI2);  // target is always in [0, 2π)
     theta_m_ref_prev = LOG_theta_m_ref;
+    LOG_theta_m_fb = LOG_theta_m;
+    LOG_pos_use_accum = 0;
     return SUCCESS;
 }
 
@@ -766,6 +806,7 @@ int task_wolfpack_set_theta_m_ref_abs(double theta)
                                        scurve_default_j_max);
         return SUCCESS;
     }
+    reset_position_mode_state();
     LOG_T_e_cmd_inte = 0;
     LOG_pos_Error_Prop = 0;
     LOG_pos_Error_Integral = 0;
@@ -774,6 +815,8 @@ int task_wolfpack_set_theta_m_ref_abs(double theta)
     en_position_loop = 1;
     LOG_theta_m_ref = theta;
     theta_m_ref_prev = LOG_theta_m_ref;
+    LOG_theta_m_fb = LOG_theta_m_accum;
+    LOG_pos_use_accum = 1;
     return SUCCESS;
 }
 
@@ -792,6 +835,7 @@ int task_wolfpack_set_theta_m_ref_rel(double delta_theta)
                                        scurve_default_j_max);
         return SUCCESS;
     }
+    reset_position_mode_state();
     LOG_pos_Error_Prop = 0;
     LOG_pos_Error_Integral = 0;
     pos_w_m_ref_inte = 0;
@@ -803,6 +847,9 @@ int task_wolfpack_set_theta_m_ref_rel(double delta_theta)
     pos_use_accum = 1;
     en_position_loop = 1;
     LOG_theta_m_ref += delta_theta;
+    theta_m_ref_prev = LOG_theta_m_ref;
+    LOG_theta_m_fb = LOG_theta_m_accum;
+    LOG_pos_use_accum = 1;
     return SUCCESS;
 }
 
