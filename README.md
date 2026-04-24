@@ -3,7 +3,7 @@
 ## Overview
 The position loop sits as the outermost ring in a three-loop cascade:
 ```
-Position Loop (P + VFF)
+Position Loop (PI + VFF)
   └─> Speed Loop (PI + Accel FF)
         └─> Current Loop (PI per d/q axis)
               └─> SVPWM / Inverter
@@ -66,8 +66,9 @@ wolfpack set_theta_m_ref_rel 3.1416     # move another +π rad CW — now at 2π
 ```
 error = theta_ref − theta_feedback
 w_ref_prop = Kpp × error
+w_ref_inte += Ki × error × Ts  (anti-windup clamped ±w_ref_max)
 w_vff = Kvff × (theta_ref[k] − theta_ref[k−1]) / Ts
-w_ref = w_ref_prop + w_vff
+w_ref = w_ref_prop + w_ref_inte + w_vff
 w_ref = clamp(w_ref, ±w_ref_max)
 ```
 
