@@ -770,24 +770,11 @@ int task_wolfpack_set_w_m_ref(double w)
 int task_wolfpack_set_theta_m_ref(double theta)
 {
     reset_position_mode_state();
-    {
-        double theta_wrapped = fmod(theta, PI2);
-        if (theta_wrapped < 0.0) theta_wrapped += PI2;
-        pos_use_accum = 0;
-        en_position_loop = 1;
-        LOG_theta_m_ref = theta_wrapped;
-        theta_m_ref_prev = LOG_theta_m_ref;
-        LOG_theta_m_fb = LOG_theta_m;
-        LOG_pos_use_accum = 0;
-        return SUCCESS;
-    }
-    LOG_T_e_cmd_inte = 0;
-    LOG_pos_Error_Prop = 0;
-    LOG_pos_Error_Integral = 0;
-    pos_w_m_ref_inte = 0;
+    double theta_wrapped = fmod(theta, PI2);
+    if (theta_wrapped < 0.0) theta_wrapped += PI2;
     pos_use_accum = 0;
     en_position_loop = 1;
-    LOG_theta_m_ref = fmod(fabs(theta), PI2);  // target is always in [0, 2π)
+    LOG_theta_m_ref = theta_wrapped;
     theta_m_ref_prev = LOG_theta_m_ref;
     LOG_theta_m_fb = LOG_theta_m;
     LOG_pos_use_accum = 0;

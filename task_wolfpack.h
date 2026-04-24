@@ -37,9 +37,8 @@ int task_wolfpack_set_ireg_kid(double ki);
 int task_wolfpack_set_ireg_kpq(double kp);
 int task_wolfpack_set_ireg_kiq(double ki);
 
-double compute_log_dt(double current);
-void task_controller_stats_print(void);
-void task_controller_stats_reset(void);
+void task_wolfpack_stats_print(void);
+void task_wolfpack_stats_reset(void);
 
 // S-curve enable/disable and parameter setters
 int task_wolfpack_set_scurve_en(int en);
