@@ -178,6 +178,19 @@ wolfpack set_speed_vff_gain <val>
 
 When `scurve_en 1`, `set_theta_m_ref_abs` and `set_theta_m_ref_rel` automatically route through the CFF trajectory.
 
+## Status & Known Issues
+
+### Working
+- Full cascade control loop: position PI+VFF → speed PI+CFF → MTPA → current PI → SVPWM
+- S-curve CFF cosine-bell velocity trajectory with torque feedforward
+- Position handoff (S-curve → position loop) when within 0.5 rad of target
+- All CLI commands: `scurve_goto`, `scurve_en`, gain setters, state machine transitions
+
+### Known Bugs
+- **No `zero_accum` command.** `LOG_theta_m_accum` is never user-resettable. After power-on the accumulated angle starts at whatever the encoder reports, so `scurve_goto <N>` targets absolute rad from that arbitrary start — not from a clean user-defined zero. This makes repeatable floor positions impossible without physically parking the motor at encoder zero every boot.
+- **S-curve handoff threshold is fixed at 0.5 rad.** For slow or short moves the motor can fall into position-hold mode too early, leaving the final 0.5 rad to the (slower) position PI rather than the trajectory. This can cause sluggish final approach.
+- **`scurve_goto_vel` is identical to `scurve_goto`** — the "vel" variant was intended to allow a velocity-only trajectory (no position handoff) but was never differentiated.
+
 ## Startup Sequence
 ```
 wolfpack init
