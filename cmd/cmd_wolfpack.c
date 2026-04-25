@@ -49,6 +49,9 @@ static command_help_t cmd_help[] = {
 	{ "scurve_goto_vel", "CFF S-curve to <rotations> (alias for scurve_goto)" },
 	{ "scurve_stop", "Abort active S-curve and hold current position" },
 	{ "set_speed_vff_gain", "Set CFF torque feedforward gain (0=off, 1=full model-based)" },
+	{ "zero_accum", "Zero accum at current position and drive shaft to encoder zero" },
+	{ "elevator_floor", "Go to floor <N> (N * floor_spacing rotations) via S-curve" },
+	{ "elevator_set_spacing", "Set floor spacing in rotations (default 10.0)" },
 };
 
 
@@ -295,6 +298,23 @@ int cmd_wolfpack(int argc, char **argv)
     if (argc == 3 && STREQ("set_speed_vff_gain", argv[1])) {
         double gain = strtod(argv[2], NULL);
         if (task_wolfpack_set_speed_vff_gain(gain) != SUCCESS) return CMD_FAILURE;
+        return CMD_SUCCESS;
+    }
+
+    if (argc == 2 && STREQ("zero_accum", argv[1])) {
+        task_wolfpack_zero_accum();
+        return CMD_SUCCESS;
+    }
+
+    if (argc == 3 && STREQ("elevator_floor", argv[1])) {
+        int floor = (int)strtol(argv[2], NULL, 10);
+        task_wolfpack_elevator_floor(floor);
+        return CMD_SUCCESS;
+    }
+
+    if (argc == 3 && STREQ("elevator_set_spacing", argv[1])) {
+        double s = strtod(argv[2], NULL);
+        if (task_wolfpack_set_elevator_floor_spacing(s) != SUCCESS) return CMD_FAILURE;
         return CMD_SUCCESS;
     }
 

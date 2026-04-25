@@ -58,5 +58,11 @@ void task_wolfpack_start_scurve_cff(double target_rotations,
 // CFF torque feedforward gain
 int task_wolfpack_set_speed_vff_gain(double gain);
 
+// Zero accumulator at current position and drive shaft to encoder zero
+void task_wolfpack_zero_accum(void);
+
+// Elevator floor commands
+void task_wolfpack_elevator_floor(int floor_num);
+int  task_wolfpack_set_elevator_floor_spacing(double spacing);
 
 #endif // TASK_WOLFPACK_H
