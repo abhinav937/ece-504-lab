@@ -435,11 +435,11 @@ void task_wolfpack_callback(void *arg)
 		// Advances LOG_theta_m_ref toward ramp_theta_target at most ramp_w_max [rad/s].
 		// When remaining distance <= ramp_w_max/Fs, the output snaps exactly to target.
 		if (ramp_active) {
-		    double theta_remaining = ramp_theta_target - ramp_theta_out_prev;
-		    double w_requested = theta_remaining * TASK_WOLFPACK_UPDATES_PER_SEC;
-		    double w_allowed = fmax(-ramp_w_max, fmin(ramp_w_max, w_requested));
-		    LOG_theta_m_ref = ramp_theta_out_prev + w_allowed * Ts;
-		    ramp_theta_out_prev = LOG_theta_m_ref;
+		    LOG_ramp_theta_remaining = ramp_theta_target - ramp_theta_out_prev;
+		    LOG_ramp_w_requested     = LOG_ramp_theta_remaining * TASK_WOLFPACK_UPDATES_PER_SEC;
+		    LOG_ramp_w_allowed       = fmax(-ramp_w_max, fmin(ramp_w_max, LOG_ramp_w_requested));
+		    LOG_theta_m_ref          = ramp_theta_out_prev + LOG_ramp_w_allowed * Ts;
+		    ramp_theta_out_prev      = LOG_theta_m_ref;
 		}
 
 		LOG_pwm_state = pwm_enable();				// Enable PWMs
