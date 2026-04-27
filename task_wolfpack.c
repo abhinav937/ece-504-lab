@@ -232,13 +232,20 @@ static task_control_block_t tcb;  			// Scheduler TCB which holds task "context"
 //           LOG_theta_m_ref = out_prev + w_allowed * Ts
 // When |theta_remaining| <= ramp_w_max/Fs the ramp converges exactly to the target in one step.
 double ramp_w_max               = 50.0;   // speed limit for the reference ramp [rad/s]
+double ramp_a_max = 5;
 double LOG_ramp_theta_target        = 0.0;   // final target position [rad]
 double ramp_theta_out_prev      = 0.0;   // ramp integrator state from previous ISR [rad]
 int    ramp_active              = 0;     // 1 while ramp is tracking towards target
 double LOG_ramp_theta_remaining = 0.0;  // distance left to target [rad]
 double LOG_ramp_w_requested     = 0.0;  // unclamped speed needed to close in one step [rad/s]
-double LOG_ramp_w_allowed       = 0.0;  // clamped speed actually applied [rad/s]
-double LOG_del_theta_allowed       = 0.0;  // clamped speed actually applied [rad/s]
+double LOG_ramp_w_allowed       = 0.0;  // clamped speed [rad/s]
+double LOG_ramp_w_allowed_prev  = 0.0;  // previous ISR ramp_w_allowed [rad/s]
+double LOG_ramp_w_allowed_err   = 0.0;  // delta velocity this step [rad/s]
+double LOG_a_requested          = 0.0;  // unclamped acceleration [rad/s^2]
+double LOG_ramp_a_allowed       = 0.0;  // clamped acceleration [rad/s^2]
+double LOG_del_w_allowed        = 0.0;  // velocity increment from acceleration limit [rad/s]
+double LOG_w_ref_out_limited_ramp = 0.0; // acceleration-limited velocity output [rad/s]
+double LOG_del_theta_allowed    = 0.0;  // position increment applied this step [rad]
 static int theta_feedback_initialized = 0;
 
 static void reset_position_mode_state(void)
@@ -394,9 +401,19 @@ void task_wolfpack_callback(void *arg)
 		pos_w_m_ref_inte = 0;
 		theta_m_ref_prev = LOG_theta_m_ref;
 		LOG_w_m_vff = 0;
-		ramp_active         = 0;
-		LOG_ramp_theta_target   = 0.0;
-		ramp_theta_out_prev = 0.0;
+		ramp_active              = 0;
+		LOG_ramp_theta_target    = 0.0;
+		ramp_theta_out_prev      = 0.0;
+		LOG_ramp_theta_remaining = 0.0;
+		LOG_ramp_w_requested     = 0.0;
+		LOG_ramp_w_allowed       = 0.0;
+		LOG_ramp_w_allowed_prev  = 0.0;
+		LOG_ramp_w_allowed_err   = 0.0;
+		LOG_a_requested          = 0.0;
+		LOG_ramp_a_allowed       = 0.0;
+		LOG_del_w_allowed        = 0.0;
+		LOG_w_ref_out_limited_ramp = 0.0;
+		LOG_del_theta_allowed    = 0.0;
 		LOG_T_e_cmd_prop = 0;
 		LOG_T_e_cmd_inte = 0;
 		LOG_T_e_cmd      = 0;
@@ -448,9 +465,27 @@ void task_wolfpack_callback(void *arg)
 		    		LOG_ramp_w_allowed = -ramp_w_max;
 		    	else
 		    		LOG_ramp_w_allowed = LOG_ramp_w_requested;
+		    LOG_ramp_w_allowed_err = LOG_ramp_w_allowed - LOG_ramp_w_allowed_prev;
+		    LOG_a_requested = LOG_ramp_w_allowed_err*TASK_WOLFPACK_UPDATES_PER_SEC;
 
-		    LOG_del_theta_allowed = LOG_ramp_w_allowed * Ts;
-		    LOG_theta_m_ref          = ramp_theta_out_prev + LOG_ramp_w_allowed * Ts;
+		    if(LOG_a_requested>0)
+		    	if(LOG_a_requested>ramp_a_max)
+		    		LOG_ramp_a_allowed = ramp_a_max;
+		    	else
+		    		LOG_ramp_a_allowed = LOG_a_requested;
+		    else
+		    	if(LOG_a_requested<-ramp_a_max)
+		    		LOG_ramp_a_allowed = -ramp_a_max;
+		    	else
+		    		LOG_ramp_a_allowed = LOG_a_requested;
+
+		    LOG_del_w_allowed=LOG_ramp_a_allowed * Ts;
+		    LOG_w_ref_out_limited_ramp = LOG_del_w_allowed+LOG_ramp_w_allowed_prev;
+		    LOG_ramp_w_allowed_prev = LOG_w_ref_out_limited_ramp;
+
+
+		    LOG_del_theta_allowed =  LOG_w_ref_out_limited_ramp * Ts;
+		    LOG_theta_m_ref          = ramp_theta_out_prev + LOG_w_ref_out_limited_ramp * Ts;
 		    ramp_theta_out_prev      = LOG_theta_m_ref;
 		}
 
