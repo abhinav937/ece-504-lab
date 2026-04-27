@@ -231,10 +231,13 @@ static task_control_block_t tcb;  			// Scheduler TCB which holds task "context"
 //           w_allowed   = clamp(w_requested, -ramp_w_max, +ramp_w_max)
 //           LOG_theta_m_ref = out_prev + w_allowed * Ts
 // When |theta_remaining| <= ramp_w_max/Fs the ramp converges exactly to the target in one step.
-double ramp_w_max          = 50.0;   // speed limit for the reference ramp [rad/s]
-double ramp_theta_target   = 0.0;   // final target position [rad]
-double ramp_theta_out_prev = 0.0;   // ramp integrator state from previous ISR [rad]
-int    ramp_active         = 0;     // 1 while ramp is tracking towards target
+double ramp_w_max               = 50.0;   // speed limit for the reference ramp [rad/s]
+double ramp_theta_target        = 0.0;   // final target position [rad]
+double ramp_theta_out_prev      = 0.0;   // ramp integrator state from previous ISR [rad]
+int    ramp_active              = 0;     // 1 while ramp is tracking towards target
+double LOG_ramp_theta_remaining = 0.0;  // distance left to target [rad]
+double LOG_ramp_w_requested     = 0.0;  // unclamped speed needed to close in one step [rad/s]
+double LOG_ramp_w_allowed       = 0.0;  // clamped speed actually applied [rad/s]
 
 static int theta_feedback_initialized = 0;
 
@@ -865,22 +868,11 @@ int task_wolfpack_set_ramp_w_max(double w)
     return SUCCESS;
 }
 
-// Zero accumulator at current position and drive shaft to encoder zero (wrapped, shortest path).
-void task_wolfpack_zero_accum(void)
+// Ramp to an absolute position specified in rotations.
+// Converts to radians and calls set_theta_m_ref_abs which starts the ramp.
+int task_wolfpack_goto_rot(double rotations)
 {
-    LOG_theta_m_accum      = 0.0;
-    pos_w_m_ref_inte       = 0.0;
-    LOG_pos_Error_Prop     = 0.0;
-    LOG_pos_Error_Integral = 0.0;
-    ramp_active            = 0;
-    ramp_theta_target      = 0.0;
-    ramp_theta_out_prev    = 0.0;
-    pos_use_accum     = 0;
-    en_position_loop  = 1;
-    LOG_theta_m_ref   = 0.0;
-    theta_m_ref_prev  = 0.0;
-    LOG_theta_m_fb    = LOG_theta_m;
-    LOG_pos_use_accum = 0;
+    return task_wolfpack_set_theta_m_ref_abs(rotations * PI2);
 }
 
 void task_wolfpack_stats_print(void)

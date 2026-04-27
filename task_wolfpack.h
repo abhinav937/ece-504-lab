@@ -40,8 +40,8 @@ int task_wolfpack_set_ireg_kiq(double ki);
 // Speed-limited position reference ramp
 int task_wolfpack_set_ramp_w_max(double w);
 
-// Zero accumulator at current position and drive shaft to encoder zero
-void task_wolfpack_zero_accum(void);
+// Ramp to absolute position in rotations
+int task_wolfpack_goto_rot(double rotations);
 
 void task_wolfpack_stats_print(void);
 void task_wolfpack_stats_reset(void);

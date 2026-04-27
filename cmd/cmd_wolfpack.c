@@ -42,7 +42,7 @@ static command_help_t cmd_help[] = {
 	{ "set_ireg_kpq", "Set q-axis current-loop proportional gain [V/A]" },
 	{ "set_ireg_kiq", "Set q-axis current-loop integral gain [V/(A*s)]" },
 	{ "set_ramp_w_max", "Set position-reference ramp speed limit [rad/s] (default 50.0)" },
-	{ "zero_accum", "Zero accum at current position and drive shaft to encoder zero" },
+	{ "goto", "Ramp to absolute position <rotations> at ramp_w_max" },
 };
 
 
@@ -251,8 +251,9 @@ int cmd_wolfpack(int argc, char **argv)
         return CMD_SUCCESS;
     }
 
-    if (argc == 2 && STREQ("zero_accum", argv[1])) {
-        task_wolfpack_zero_accum();
+    if (argc == 3 && STREQ("goto", argv[1])) {
+        double rot = strtod(argv[2], NULL);
+        if (task_wolfpack_goto_rot(rot) != SUCCESS) return CMD_FAILURE;
         return CMD_SUCCESS;
     }
 
