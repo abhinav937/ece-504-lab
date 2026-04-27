@@ -232,13 +232,13 @@ static task_control_block_t tcb;  			// Scheduler TCB which holds task "context"
 //           LOG_theta_m_ref = out_prev + w_allowed * Ts
 // When |theta_remaining| <= ramp_w_max/Fs the ramp converges exactly to the target in one step.
 double ramp_w_max               = 50.0;   // speed limit for the reference ramp [rad/s]
-double ramp_theta_target        = 0.0;   // final target position [rad]
+double LOG_ramp_theta_target        = 0.0;   // final target position [rad]
 double ramp_theta_out_prev      = 0.0;   // ramp integrator state from previous ISR [rad]
 int    ramp_active              = 0;     // 1 while ramp is tracking towards target
 double LOG_ramp_theta_remaining = 0.0;  // distance left to target [rad]
 double LOG_ramp_w_requested     = 0.0;  // unclamped speed needed to close in one step [rad/s]
 double LOG_ramp_w_allowed       = 0.0;  // clamped speed actually applied [rad/s]
-
+double LOG_del_theta_allowed       = 0.0;  // clamped speed actually applied [rad/s]
 static int theta_feedback_initialized = 0;
 
 static void reset_position_mode_state(void)
@@ -395,7 +395,7 @@ void task_wolfpack_callback(void *arg)
 		theta_m_ref_prev = LOG_theta_m_ref;
 		LOG_w_m_vff = 0;
 		ramp_active         = 0;
-		ramp_theta_target   = 0.0;
+		LOG_ramp_theta_target   = 0.0;
 		ramp_theta_out_prev = 0.0;
 		LOG_T_e_cmd_prop = 0;
 		LOG_T_e_cmd_inte = 0;
@@ -435,9 +435,21 @@ void task_wolfpack_callback(void *arg)
 		// Advances LOG_theta_m_ref toward ramp_theta_target at most ramp_w_max [rad/s].
 		// When remaining distance <= ramp_w_max/Fs, the output snaps exactly to target.
 		if (ramp_active) {
-		    LOG_ramp_theta_remaining = ramp_theta_target - ramp_theta_out_prev;
+		    LOG_ramp_theta_remaining = LOG_ramp_theta_target - ramp_theta_out_prev;
 		    LOG_ramp_w_requested     = LOG_ramp_theta_remaining * TASK_WOLFPACK_UPDATES_PER_SEC;
-		    LOG_ramp_w_allowed       = fmax(-ramp_w_max, fmin(ramp_w_max, LOG_ramp_w_requested));
+//		    LOG_ramp_w_allowed       = fmax(-ramp_w_max, fmin(ramp_w_max, LOG_ramp_w_requested));
+		    if(LOG_ramp_w_requested>0)
+		    	if(LOG_ramp_w_requested>ramp_w_max)
+		    		LOG_ramp_w_allowed = ramp_w_max;
+		    	else
+		    		LOG_ramp_w_allowed = LOG_ramp_w_requested;
+		    else
+		    	if(LOG_ramp_w_requested<-ramp_w_max)
+		    		LOG_ramp_w_allowed = -ramp_w_max;
+		    	else
+		    		LOG_ramp_w_allowed = LOG_ramp_w_requested;
+
+		    LOG_del_theta_allowed = LOG_ramp_w_allowed * Ts;
 		    LOG_theta_m_ref          = ramp_theta_out_prev + LOG_ramp_w_allowed * Ts;
 		    ramp_theta_out_prev      = LOG_theta_m_ref;
 		}
@@ -758,7 +770,7 @@ int task_wolfpack_set_theta_m_ref_abs(double theta)
     reset_position_mode_state();
     pos_use_accum       = 1;
     en_position_loop    = 1;
-    ramp_theta_target   = theta;
+    LOG_ramp_theta_target   = theta;
     ramp_theta_out_prev = LOG_theta_m_accum;
     LOG_theta_m_ref     = LOG_theta_m_accum;
     theta_m_ref_prev    = LOG_theta_m_accum;
@@ -776,13 +788,13 @@ int task_wolfpack_set_theta_m_ref_rel(double delta_theta)
     if (!en_position_loop || !pos_use_accum || !ramp_active) {
         // First call from non-accum/non-ramp mode: anchor ramp to current position
         ramp_theta_out_prev = LOG_theta_m_accum;
-        ramp_theta_target   = LOG_theta_m_accum;
+        LOG_ramp_theta_target   = LOG_theta_m_accum;
         LOG_theta_m_ref     = LOG_theta_m_accum;
         theta_m_ref_prev    = LOG_theta_m_accum;
     }
     pos_use_accum      = 1;
     en_position_loop   = 1;
-    ramp_theta_target += delta_theta;
+    LOG_ramp_theta_target += delta_theta;
     LOG_theta_m_fb     = LOG_theta_m_accum;
     LOG_pos_use_accum  = 1;
     ramp_active        = 1;
