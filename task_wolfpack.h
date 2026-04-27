@@ -37,32 +37,13 @@ int task_wolfpack_set_ireg_kid(double ki);
 int task_wolfpack_set_ireg_kpq(double kp);
 int task_wolfpack_set_ireg_kiq(double ki);
 
-void task_wolfpack_stats_print(void);
-void task_wolfpack_stats_reset(void);
-
-// S-curve enable/disable and parameter setters
-int task_wolfpack_set_scurve_en(int en);
-int task_wolfpack_set_scurve_v_max(double v);
-int task_wolfpack_set_scurve_a_max(double a);
-int task_wolfpack_set_scurve_j_max(double j);
-int task_wolfpack_scurve_stop(void);
-
-// S-curve goto helpers (use stored default params)
-void task_wolfpack_scurve_goto(double target_rotations);
-void task_wolfpack_scurve_goto_vel(double target_rotations);
-
-// CFF trajectory starter (explicit, bypasses scurve_en flag)
-void task_wolfpack_start_scurve_cff(double target_rotations,
-                                     double v_max, double a_max, double j_max);
-
-// CFF torque feedforward gain
-int task_wolfpack_set_speed_vff_gain(double gain);
+// Speed-limited position reference ramp
+int task_wolfpack_set_ramp_w_max(double w);
 
 // Zero accumulator at current position and drive shaft to encoder zero
 void task_wolfpack_zero_accum(void);
 
-// Elevator floor commands
-void task_wolfpack_elevator_floor(int floor_num);
-int  task_wolfpack_set_elevator_floor_spacing(double spacing);
+void task_wolfpack_stats_print(void);
+void task_wolfpack_stats_reset(void);
 
 #endif // TASK_WOLFPACK_H

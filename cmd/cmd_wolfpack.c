@@ -28,8 +28,8 @@ static command_help_t cmd_help[] = {
     { "set_i_d_ref_manual", "Set d axis current manual ref [A]" },
 	{ "set_w_m_ref", "Set the commanded rotor speed reference [rad/s]"},
 	{ "set_theta_m_ref", "Set single-rev position reference, [0, 2pi), shortest path [rad]"},
-	{ "set_theta_m_ref_abs", "Set absolute multi-turn position from encoder zero [rad]" },
-	{ "set_theta_m_ref_rel", "Add delta to current position reference; stacks: 5pi+5pi == 10pi [rad]" },
+	{ "set_theta_m_ref_abs", "Set absolute multi-turn position from encoder zero, ramped at ramp_w_max [rad]" },
+	{ "set_theta_m_ref_rel", "Add delta to current position ramp target; stacks: 5pi+5pi == 10pi [rad]" },
 	{ "set_pos_kp", "Set position-loop proportional gain [rad/s per rad]" },
 	{ "set_pos_ki", "Set position-loop integral gain [rad/s per rad*s]" },
 	{ "set_pos_w_m_ref_max", "Set position-loop speed command limit [rad/s]" },
@@ -41,17 +41,8 @@ static command_help_t cmd_help[] = {
 	{ "set_ireg_kid", "Set d-axis current-loop integral gain [V/(A*s)]" },
 	{ "set_ireg_kpq", "Set q-axis current-loop proportional gain [V/A]" },
 	{ "set_ireg_kiq", "Set q-axis current-loop integral gain [V/(A*s)]" },
-	{ "scurve_en", "Enable (1) or disable (0) CFF S-curve mode for set_theta_m_ref_abs/_rel" },
-	{ "scurve_set_v_max", "Set default S-curve max velocity [rad/s]" },
-	{ "scurve_set_a_max", "Set default S-curve max acceleration [rad/s^2]" },
-	{ "scurve_set_j_max", "Set default S-curve max jerk [rad/s^3]" },
-	{ "scurve_goto", "CFF S-curve to <rotations> using current default params" },
-	{ "scurve_goto_vel", "CFF S-curve to <rotations> (alias for scurve_goto)" },
-	{ "scurve_stop", "Abort active S-curve and hold current position" },
-	{ "set_speed_vff_gain", "Set CFF torque feedforward gain (0=off, 1=full model-based)" },
+	{ "set_ramp_w_max", "Set position-reference ramp speed limit [rad/s] (default 50.0)" },
 	{ "zero_accum", "Zero accum at current position and drive shaft to encoder zero" },
-	{ "elevator_floor", "Go to floor <N> (N * floor_spacing rotations) via S-curve" },
-	{ "elevator_set_spacing", "Set floor spacing in rotations (default 10.0)" },
 };
 
 
@@ -254,67 +245,14 @@ int cmd_wolfpack(int argc, char **argv)
         return CMD_SUCCESS;
     }
 
-    if (argc == 3 && STREQ("scurve_en", argv[1])) {
-        int en = (int)strtol(argv[2], NULL, 10);
-        if (task_wolfpack_set_scurve_en(en) != SUCCESS) return CMD_FAILURE;
-        return CMD_SUCCESS;
-    }
-
-    if (argc == 3 && STREQ("scurve_set_v_max", argv[1])) {
-        double v = strtod(argv[2], NULL);
-        if (task_wolfpack_set_scurve_v_max(v) != SUCCESS) return CMD_FAILURE;
-        return CMD_SUCCESS;
-    }
-
-    if (argc == 3 && STREQ("scurve_set_a_max", argv[1])) {
-        double a = strtod(argv[2], NULL);
-        if (task_wolfpack_set_scurve_a_max(a) != SUCCESS) return CMD_FAILURE;
-        return CMD_SUCCESS;
-    }
-
-    if (argc == 3 && STREQ("scurve_set_j_max", argv[1])) {
-        double j = strtod(argv[2], NULL);
-        if (task_wolfpack_set_scurve_j_max(j) != SUCCESS) return CMD_FAILURE;
-        return CMD_SUCCESS;
-    }
-
-    if (argc == 3 && STREQ("scurve_goto", argv[1])) {
-        double rot = strtod(argv[2], NULL);
-        task_wolfpack_scurve_goto(rot);
-        return CMD_SUCCESS;
-    }
-
-    if (argc == 3 && STREQ("scurve_goto_vel", argv[1])) {
-        double rot = strtod(argv[2], NULL);
-        task_wolfpack_scurve_goto_vel(rot);
-        return CMD_SUCCESS;
-    }
-
-    if (argc == 2 && STREQ("scurve_stop", argv[1])) {
-        if (task_wolfpack_scurve_stop() != SUCCESS) return CMD_FAILURE;
-        return CMD_SUCCESS;
-    }
-
-    if (argc == 3 && STREQ("set_speed_vff_gain", argv[1])) {
-        double gain = strtod(argv[2], NULL);
-        if (task_wolfpack_set_speed_vff_gain(gain) != SUCCESS) return CMD_FAILURE;
+    if (argc == 3 && STREQ("set_ramp_w_max", argv[1])) {
+        double w = strtod(argv[2], NULL);
+        if (task_wolfpack_set_ramp_w_max(w) != SUCCESS) return CMD_FAILURE;
         return CMD_SUCCESS;
     }
 
     if (argc == 2 && STREQ("zero_accum", argv[1])) {
         task_wolfpack_zero_accum();
-        return CMD_SUCCESS;
-    }
-
-    if (argc == 3 && STREQ("elevator_floor", argv[1])) {
-        int floor = (int)strtol(argv[2], NULL, 10);
-        task_wolfpack_elevator_floor(floor);
-        return CMD_SUCCESS;
-    }
-
-    if (argc == 3 && STREQ("elevator_set_spacing", argv[1])) {
-        double s = strtod(argv[2], NULL);
-        if (task_wolfpack_set_elevator_floor_spacing(s) != SUCCESS) return CMD_FAILURE;
         return CMD_SUCCESS;
     }
 

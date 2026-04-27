@@ -225,40 +225,16 @@ double LOG_control_runtime = 0;
 static uint32_t last_now_start = 0;
 static task_control_block_t tcb;  			// Scheduler TCB which holds task "context"
 
-// ==================== S-CURVE GLOBAL ENABLE + DEFAULT PARAMS ====================
-int    scurve_en = 0;              // 1 = route set_theta_m_ref_abs/_rel through S-curve
-double scurve_default_v_max = 18.0;   // [rad/s]
-double scurve_default_a_max =  2.5;   // [rad/s^2]
-double scurve_default_j_max = 25.0;   // [rad/s^3] — reserved for future 7-phase NSD jerk-limited profile
-
-// ==================== CFF VELOCITY TRAJECTORY (distance-based trapezoidal) ====================
-int    scurve_active        = 0;
-double scurve_direction     = 1.0;
-double scurve_target_theta  = 0.0;
-double scurve_initial_delta = 0.0;  // total distance at trajectory start [rad], for progress
-double scurve_v_max_cur     = 0.0;  // peak velocity for this move [rad/s]
-double scurve_a_max_cur     = 0.0;  // acceleration for this move [rad/s^2]
-double scurve_v_cur         = 0.0;  // current velocity output [rad/s]
-
-// 0 = accelerating/cruising, 1 = decelerating
-int    LOG_scurve_phase     = 0;
-static int scurve_decel_latched = 0;  // once decel entered, never re-enter accel
-
-// ==================== CFF TORQUE FEEDFORWARD ====================
-double LOG_T_e_cmd_ff = 0.0;       // Torque feedforward from commanded acceleration [N*m]
-double speed_vff_gain = 1.0;       // CFF gain (0=off, 1=full model-based)
-static double w_m_ref_prev = 0.0;  // Previous velocity reference for derivative [rad/s]
-
-// ==================== S-CURVE LOGGING VARIABLES ====================
-double LOG_scurve_progress  = 0.0;  // normalized 0→1 progress (distance-based)
-double LOG_scurve_remaining = 0.0;  // remaining distance to target [rad]
-
-// ==================== ZERO ACCUM GUARD ====================
-// Set by zero_accum(), cleared by sm_calibrate(). S-curve is blocked until this is 1.
-static int zero_accum_done = 0;
-
-// ==================== ELEVATOR FLOOR COMMAND ====================
-double elevator_floor_spacing = 10.0; // rotations per floor (configurable, default 10)
+// ==================== SPEED-LIMITED POSITION REFERENCE RAMP ====================
+// Each ISR: theta_remaining = target - out_prev
+//           w_requested = theta_remaining * Fs   (distance to cover in one step)
+//           w_allowed   = clamp(w_requested, -ramp_w_max, +ramp_w_max)
+//           LOG_theta_m_ref = out_prev + w_allowed * Ts
+// When |theta_remaining| <= ramp_w_max/Fs the ramp converges exactly to the target in one step.
+double ramp_w_max          = 50.0;   // speed limit for the reference ramp [rad/s]
+double ramp_theta_target   = 0.0;   // final target position [rad]
+double ramp_theta_out_prev = 0.0;   // ramp integrator state from previous ISR [rad]
+int    ramp_active         = 0;     // 1 while ramp is tracking towards target
 
 static int theta_feedback_initialized = 0;
 
@@ -266,73 +242,13 @@ static void reset_position_mode_state(void)
 {
 	LOG_T_e_cmd_prop = 0.0;
 	LOG_T_e_cmd_inte = 0.0;
-	LOG_T_e_cmd_ff = 0.0;
 	LOG_T_e_cmd = 0.0;
 	LOG_pos_Error_Prop = 0.0;
 	LOG_pos_Error_Integral = 0.0;
 	pos_w_m_ref_inte = 0.0;
 	LOG_w_m_ref = 0.0;
 	LOG_w_m_vff = 0.0;
-	w_m_ref_prev = 0.0;
-}
-
-static void update_scurve_cff(void)
-{
-    double remaining    = fabs(scurve_target_theta - LOG_theta_m_accum);
-    double braking_dist = (scurve_v_cur * scurve_v_cur) / (2.0 * scurve_a_max_cur);
-
-    LOG_scurve_remaining = remaining;
-
-    // One-way latch: once braking distance threshold is crossed, never re-accelerate.
-    // Without the latch, v_cur and braking_dist shrink together each step causing
-    // rapid 0<->1 phase toggling that corrupts the velocity profile.
-    if (!scurve_decel_latched && remaining <= braking_dist + 0.05) {
-        scurve_decel_latched = 1;
-    }
-
-    if (scurve_decel_latched) {
-        LOG_scurve_phase = 1;
-        scurve_v_cur -= scurve_a_max_cur * Ts;
-        if (scurve_v_cur < 0.0) scurve_v_cur = 0.0;
-    } else {
-        LOG_scurve_phase = 0;
-        scurve_v_cur += scurve_a_max_cur * Ts;
-        if (scurve_v_cur > scurve_v_max_cur) scurve_v_cur = scurve_v_max_cur;
-    }
-
-    LOG_w_m_ref = scurve_direction * scurve_v_cur;
-
-    // Integrate position reference along the commanded velocity each ISR.
-    // This keeps LOG_theta_m_ref tracking the trajectory so that at handoff,
-    // the snap to scurve_target_theta is a small correction (tracking error only,
-    // ~0.1 rad) rather than the full 1–2 rad the motor undershot due to speed PI lag.
-    LOG_theta_m_ref += LOG_w_m_ref * Ts;
-    theta_m_ref_prev  = LOG_theta_m_ref;
-
-    // Distance-based progress: 0.0 at start, 1.0 at target
-    if (scurve_initial_delta > 0.01) {
-        LOG_scurve_progress = 1.0 - (remaining / scurve_initial_delta);
-        if (LOG_scurve_progress < 0.0) LOG_scurve_progress = 0.0;
-        if (LOG_scurve_progress > 1.0) LOG_scurve_progress = 1.0;
-    }
-
-    // Hand off to position loop once decel has brought velocity to near-zero.
-    // The latch ensures we are always in decel when this fires.
-    // The LOG_theta_m_ref integration above means the snap to scurve_target_theta
-    // at handoff is tiny, preventing the large torque spike seen previously.
-    if (scurve_decel_latched && scurve_v_cur <= 0.3) {
-        scurve_active          = 0;
-        LOG_scurve_progress    = 1.0;
-        LOG_T_e_cmd_inte       = 0.0;
-        LOG_pos_Error_Prop     = 0.0;
-        LOG_pos_Error_Integral = 0.0;
-        pos_w_m_ref_inte       = 0.0;
-        pos_use_accum          = 1;
-        en_position_loop       = 1;
-        LOG_theta_m_ref        = scurve_target_theta;
-        theta_m_ref_prev       = scurve_target_theta;
-        scurve_decel_latched   = 0;
-    }
+	ramp_active = 0;
 }
 
 int task_wolfpack_init(void)
@@ -475,16 +391,12 @@ void task_wolfpack_callback(void *arg)
 		pos_w_m_ref_inte = 0;
 		theta_m_ref_prev = LOG_theta_m_ref;
 		LOG_w_m_vff = 0;
-		scurve_active        = 0;
-		LOG_scurve_progress  = 0.0;
-		LOG_scurve_remaining = 0.0;
-		LOG_scurve_phase     = 0;
-		scurve_v_cur         = 0.0;
+		ramp_active         = 0;
+		ramp_theta_target   = 0.0;
+		ramp_theta_out_prev = 0.0;
 		LOG_T_e_cmd_prop = 0;
 		LOG_T_e_cmd_inte = 0;
 		LOG_T_e_cmd      = 0;
-		LOG_T_e_cmd_ff   = 0.0;
-		w_m_ref_prev     = 0.0;
 
 		if (LOG_protection_status)		// Transition to TRIPPED if protections are active.
 		{
@@ -515,9 +427,16 @@ void task_wolfpack_callback(void *arg)
 		{
 			LOG_wolf_state = 1;
 		}
-		// === CFF TRAJECTORY UPDATE ===
-		if (scurve_active) {
-			update_scurve_cff();
+
+		// === SPEED-LIMITED POSITION REFERENCE RAMP ===
+		// Advances LOG_theta_m_ref toward ramp_theta_target at most ramp_w_max [rad/s].
+		// When remaining distance <= ramp_w_max/Fs, the output snaps exactly to target.
+		if (ramp_active) {
+		    double theta_remaining = ramp_theta_target - ramp_theta_out_prev;
+		    double w_requested = theta_remaining * TASK_WOLFPACK_UPDATES_PER_SEC;
+		    double w_allowed = fmax(-ramp_w_max, fmin(ramp_w_max, w_requested));
+		    LOG_theta_m_ref = ramp_theta_out_prev + w_allowed * Ts;
+		    ramp_theta_out_prev = LOG_theta_m_ref;
 		}
 
 		LOG_pwm_state = pwm_enable();				// Enable PWMs
@@ -636,20 +555,7 @@ void task_wolfpack_callback(void *arg)
 	    LOG_T_e_cmd_inte = -T_E_MAX;
 	}
 
-	// Only apply acceleration feedforward during an active CFF trajectory.
-	// A direct position step makes w_ref jump in one sample, which would otherwise
-	// create a non-physical torque impulse.
-	// CFF torque feedforward: full ME547 NSD formula M_CFF = J*dω*/dt + B*ω*
-	if (scurve_active) {
-		LOG_T_e_cmd_ff = speed_vff_gain * (
-		    J_ESTIMATE * (LOG_w_m_ref - w_m_ref_prev) * TASK_WOLFPACK_UPDATES_PER_SEC
-		    + B_ESTIMATE * LOG_w_m_ref);
-	} else {
-		LOG_T_e_cmd_ff = 0.0;
-	}
-	w_m_ref_prev = LOG_w_m_ref;
-
-	LOG_T_e_cmd = LOG_T_e_cmd_prop + LOG_T_e_cmd_inte + LOG_T_e_cmd_ff;
+	LOG_T_e_cmd = LOG_T_e_cmd_prop + LOG_T_e_cmd_inte;
 	if (LOG_T_e_cmd > T_E_MAX) {
 	    LOG_T_e_cmd = T_E_MAX;
 	} else if (LOG_T_e_cmd < -T_E_MAX) {
@@ -790,7 +696,6 @@ void task_wolfpack_sm_calibrate(void)
 	sm_request_calibrate = 1;
 	calibrate_status = 0;
 	theta_feedback_initialized = 0;
-	zero_accum_done = 0;
 }
 
 void task_wolfpack_sm_trip_clear(void)
@@ -819,14 +724,9 @@ int task_wolfpack_set_i_d_ref_manual(double i)
 int task_wolfpack_set_w_m_ref(double w)
 {
 	reset_position_mode_state();
-	LOG_T_e_cmd_inte = 0;  // reset integrator — prevents torque bump when exiting position mode
 	en_position_loop = 0;
 	pos_use_accum = 0;
-	LOG_pos_Error_Prop = 0;
-	LOG_pos_Error_Integral = 0;
-	pos_w_m_ref_inte = 0;
 	LOG_w_m_ref = w;
-	w_m_ref_prev = w;
     return SUCCESS;
 }
 
@@ -848,67 +748,41 @@ int task_wolfpack_set_theta_m_ref(double theta)
     return SUCCESS;
 }
 
-// Multi-turn absolute mode: theta is the target angle in radians from the encoder power-on zero.
-// e.g. set_theta_m_ref_abs(0) -> go to encoder zero, set_theta_m_ref_abs(10*PI) -> go to 5 full CW turns.
-// When scurve_en=1, routes through S-curve position trajectory instead of stepping directly.
+// Multi-turn absolute mode: ramps LOG_theta_m_ref toward theta at ramp_w_max [rad/s].
+// e.g. set_theta_m_ref_abs(10*PI) -> ramp to 5 full CW turns from encoder zero.
 int task_wolfpack_set_theta_m_ref_abs(double theta)
 {
-    if (scurve_en) {
-        task_wolfpack_start_scurve_cff(theta / PI2,
-                                       scurve_default_v_max,
-                                       scurve_default_a_max,
-                                       scurve_default_j_max);
-        return SUCCESS;
-    }
     reset_position_mode_state();
-    LOG_T_e_cmd_inte = 0;
-    LOG_pos_Error_Prop = 0;
-    LOG_pos_Error_Integral = 0;
-    pos_w_m_ref_inte = 0;
-    pos_use_accum = 1;
-    en_position_loop = 1;
-    LOG_theta_m_ref = theta;
-    theta_m_ref_prev = LOG_theta_m_ref;
-    LOG_theta_m_fb = LOG_theta_m_accum;
-    LOG_pos_use_accum = 1;
+    pos_use_accum       = 1;
+    en_position_loop    = 1;
+    ramp_theta_target   = theta;
+    ramp_theta_out_prev = LOG_theta_m_accum;
+    LOG_theta_m_ref     = LOG_theta_m_accum;
+    theta_m_ref_prev    = LOG_theta_m_accum;
+    LOG_theta_m_fb      = LOG_theta_m_accum;
+    LOG_pos_use_accum   = 1;
+    ramp_active         = 1;
     return SUCCESS;
 }
 
-// Multi-turn relative mode: adds delta_theta to the current reference.
-// Calling this twice with 5π gives the same endpoint as calling once with 10π.
-// First call from non-accum mode anchors reference to current accumulated position first.
-// When scurve_en=1, routes through S-curve position trajectory instead of stepping directly.
+// Multi-turn relative mode: adds delta_theta to the ramp target.
+// Stacks: calling twice with 5π gives the same endpoint as calling once with 10π.
 int task_wolfpack_set_theta_m_ref_rel(double delta_theta)
 {
-    if (scurve_en) {
-        double abs_target;
-        if (scurve_active) {
-            abs_target = scurve_target_theta;
-        } else {
-            abs_target = LOG_theta_m_accum;
-        }
-        double rot = (abs_target + delta_theta) / PI2;
-        task_wolfpack_start_scurve_cff(rot,
-                                       scurve_default_v_max,
-                                       scurve_default_a_max,
-                                       scurve_default_j_max);
-        return SUCCESS;
-    }
     reset_position_mode_state();
-    LOG_pos_Error_Prop = 0;
-    LOG_pos_Error_Integral = 0;
-    pos_w_m_ref_inte = 0;
-    if (!en_position_loop || !pos_use_accum) {
-        LOG_T_e_cmd_inte = 0;
-        LOG_theta_m_ref = LOG_theta_m_accum;
-        theta_m_ref_prev = LOG_theta_m_accum;
+    if (!en_position_loop || !pos_use_accum || !ramp_active) {
+        // First call from non-accum/non-ramp mode: anchor ramp to current position
+        ramp_theta_out_prev = LOG_theta_m_accum;
+        ramp_theta_target   = LOG_theta_m_accum;
+        LOG_theta_m_ref     = LOG_theta_m_accum;
+        theta_m_ref_prev    = LOG_theta_m_accum;
     }
-    pos_use_accum = 1;
-    en_position_loop = 1;
-    LOG_theta_m_ref += delta_theta;
-    theta_m_ref_prev = LOG_theta_m_ref;
-    LOG_theta_m_fb = LOG_theta_m_accum;
-    LOG_pos_use_accum = 1;
+    pos_use_accum      = 1;
+    en_position_loop   = 1;
+    ramp_theta_target += delta_theta;
+    LOG_theta_m_fb     = LOG_theta_m_accum;
+    LOG_pos_use_accum  = 1;
+    ramp_active        = 1;
     return SUCCESS;
 }
 
@@ -984,140 +858,29 @@ int task_wolfpack_set_ireg_kiq(double ki)
     return SUCCESS;
 }
 
-
-
-// ==================== S-CURVE ENABLE / PARAM SETTERS ====================
-
-int task_wolfpack_set_scurve_en(int en)
+int task_wolfpack_set_ramp_w_max(double w)
 {
-    scurve_en = (en != 0);
+    if (w <= 0.0) return FAILURE;
+    ramp_w_max = w;
     return SUCCESS;
 }
 
-int task_wolfpack_set_scurve_v_max(double v)
-{
-    if (v <= 0.0) return FAILURE;
-    scurve_default_v_max = v;
-    return SUCCESS;
-}
-
-int task_wolfpack_set_scurve_a_max(double a)
-{
-    if (a <= 0.0) return FAILURE;
-    scurve_default_a_max = a;
-    return SUCCESS;
-}
-
-int task_wolfpack_set_scurve_j_max(double j)
-{
-    if (j <= 0.0) return FAILURE;
-    scurve_default_j_max = j;
-    return SUCCESS;
-}
-
-int task_wolfpack_scurve_stop(void)
-{
-    scurve_active    = 0;
-    LOG_scurve_phase = 0;
-    scurve_v_cur     = 0.0;
-    // Hold wherever the motor is right now
-    task_wolfpack_set_theta_m_ref_abs(LOG_theta_m_accum);
-    return SUCCESS;
-}
-
-// ==================== S-CURVE GOTO WRAPPERS (use stored defaults) ====================
-
-void task_wolfpack_scurve_goto(double target_rotations)
-{
-    task_wolfpack_start_scurve_cff(target_rotations,
-                                   scurve_default_v_max,
-                                   scurve_default_a_max,
-                                   scurve_default_j_max);
-}
-
-void task_wolfpack_scurve_goto_vel(double target_rotations)
-{
-    task_wolfpack_start_scurve_cff(target_rotations,
-                                   scurve_default_v_max,
-                                   scurve_default_a_max,
-                                   scurve_default_j_max);
-}
-
-// ==================== CFF TRAJECTORY STARTER ====================
-
-void task_wolfpack_start_scurve_cff(double target_rotations,
-                                     double v_max, double a_max, double j_max)
-{
-    if (!zero_accum_done) {
-        return;  // require zero_accum before any S-curve motion
-    }
-
-    double target_theta = target_rotations * PI2;
-    double delta = fabs(target_theta - LOG_theta_m_accum);
-    if (delta < 0.01) {
-        return;
-    }
-
-    scurve_target_theta  = target_theta;
-    scurve_initial_delta = delta;
-    scurve_v_max_cur     = v_max;
-    scurve_a_max_cur     = a_max;
-    scurve_v_cur         = 0.0;
-    LOG_scurve_phase     = 0;
-    scurve_decel_latched = 0;
-    LOG_scurve_progress  = 0.0;
-    LOG_scurve_remaining = delta;
-
-    scurve_direction = (target_theta >= LOG_theta_m_accum) ? 1.0 : -1.0;
-
-    // Start position reference at the current actual position so the
-    // incremental integration in update_scurve_cff() begins from the right place.
-    LOG_theta_m_ref  = LOG_theta_m_accum;
-    theta_m_ref_prev = LOG_theta_m_accum;
-
-    scurve_active    = 1;
-    en_position_loop = 0;
-    pos_use_accum    = 1;
-}
-
-int task_wolfpack_set_speed_vff_gain(double gain)
-{
-    speed_vff_gain = gain;
-    return SUCCESS;
-}
-
-// ==================== ZERO ACCUM + ELEVATOR FLOOR ====================
-
+// Zero accumulator at current position and drive shaft to encoder zero (wrapped, shortest path).
 void task_wolfpack_zero_accum(void)
 {
     LOG_theta_m_accum      = 0.0;
     pos_w_m_ref_inte       = 0.0;
     LOG_pos_Error_Prop     = 0.0;
     LOG_pos_Error_Integral = 0.0;
-    zero_accum_done        = 1;
-    // Drive shaft to encoder zero (wrapped single-rev, shortest path)
+    ramp_active            = 0;
+    ramp_theta_target      = 0.0;
+    ramp_theta_out_prev    = 0.0;
     pos_use_accum     = 0;
     en_position_loop  = 1;
     LOG_theta_m_ref   = 0.0;
     theta_m_ref_prev  = 0.0;
     LOG_theta_m_fb    = LOG_theta_m;
     LOG_pos_use_accum = 0;
-}
-
-void task_wolfpack_elevator_floor(int floor_num)
-{
-    task_wolfpack_start_scurve_cff(
-        (double)floor_num * elevator_floor_spacing,
-        scurve_default_v_max,
-        scurve_default_a_max,
-        scurve_default_j_max);
-}
-
-int task_wolfpack_set_elevator_floor_spacing(double spacing)
-{
-    if (spacing <= 0.0) return FAILURE;
-    elevator_floor_spacing = spacing;
-    return SUCCESS;
 }
 
 void task_wolfpack_stats_print(void)
