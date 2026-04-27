@@ -6,10 +6,28 @@ The position loop sits as the outermost ring in a three-loop cascade:
 Position Loop (PI + VFF)
   └─> Speed Loop (PI + CFF Torque Feedforward)
         └─> MTPA decomposition
-              └─> Current Loop (PI per d/q axis)
-                    └─> SVPWM / Inverter
+              └─> Current Vector Limiter (8 A)
+                    └─> Current Loop (synchronous-frame PI per d/q axis)
+                          └─> Inverse Park → SVPWM / Inverter
 ```
-The position loop produces a speed reference. The speed loop produces a torque command. The current loop tracks the torque command by regulating d/q currents. This structure is standard in industrial servo drives.
+The position loop produces a speed reference. The speed loop produces a torque command. MTPA decomposes the torque command into d/q current references. The current loop tracks those references by regulating d/q voltages. This structure is standard in industrial servo drives.
+
+### System constants
+
+| Constant | Value | Units |
+|----------|-------|-------|
+| Control rate | 10 000 | Hz (ISR) |
+| Encoder counts/rev | 20 000 | counts |
+| Pole pairs | 4 | — |
+| PM flux linkage (λ_pm) | 0.0383 | Wb |
+| d-axis inductance (L_d) | 1.0 | mH |
+| q-axis inductance (L_q) | 1.6 | mH |
+| Stator resistance (R_s) | 0.55 | Ω |
+| Rotor inertia (J) | 0.0042668 | kg·m² |
+| Rotational damping (B) | 0.0020483 | N·m·s/rad |
+| Vector current limit | 8 | A |
+| OV trip threshold | 70 | V |
+| OC trip threshold (per phase) | 12 | A |
 
 ---
 
@@ -26,6 +44,31 @@ wolfpack elevator_floor 1          # go to floor 1  (10 rotations)
 wolfpack elevator_floor 0          # return to zero
 wolfpack sm_idle
 ```
+
+---
+
+## Protection System
+
+The firmware implements auto-latching over-voltage (OV) and per-phase over-current (OC) protection. When either trip fires the state machine enters TRIPPED (state 3), PWMs are disabled, and the fault latches until explicitly cleared.
+
+| Fault | Condition | Log variable |
+|-------|-----------|-------------|
+| Over-voltage | `LOG_v_dc > 70 V` | `LOG_OV_status_dc` |
+| Over-current phase A | `|LOG_i_a| > 12 A` | `LOG_OC_status_a` |
+| Over-current phase B | `|LOG_i_b| > 12 A` | `LOG_OC_status_b` |
+| Over-current phase C | `|LOG_i_c| > 12 A` | `LOG_OC_status_c` |
+| Combined fault | any of the above | `LOG_protection_status` |
+
+**To recover from a trip:**
+1. Resolve the root cause (reduce load, check bus voltage)
+2. Issue `wolfpack sm_trip_clear`
+3. Re-enter RUNNING with `wolfpack sm_run`
+
+**Max safe operating speed: ~80 rad/s.** At higher speeds, the q-axis back-EMF
+(`λ_pm × p × ω_m ≈ 0.0383 × 4 × ω_m`) approaches half the bus voltage, leaving no
+headroom for the current regulators. Regenerative braking from high speed also spikes
+the DC bus above 70 V and triggers OV. Field weakening is not implemented. Diagnose
+runaway trips with `LOG_OV_status_dc` and `LOG_OC_status_a/b/c`.
 
 ---
 
@@ -109,12 +152,14 @@ After `zero_accum`:
 ```
 error        = theta_ref − theta_feedback
 w_ref_prop   = Kpp × error
-w_ref_inte  += Ki × error × Ts         (anti-windup clamped ±w_ref_max)
+w_ref_inte  += Ki × error × Ts         (anti-windup: only integrate when not saturated)
 w_vff        = Kvff × (theta_ref[k] − theta_ref[k−1]) × Fs
 w_ref        = clamp(w_ref_prop + w_ref_inte + w_vff, ±w_ref_max)
 ```
 
 `theta_feedback` is `LOG_theta_m_accum` when `pos_use_accum = 1` (multi-turn modes and after S-curve handoff), or `LOG_theta_m` when `pos_use_accum = 0` (single-rev mode and during `zero_accum`).
+
+In single-rev mode, position error is additionally wrapped to **±π** for shortest-path tracking.
 
 The **velocity feedforward** differentiates the position reference each ISR cycle `(θ*[k] − θ*[k−1]) × Fs` and adds it directly to the speed reference. This anticipates trajectory motion and reduces tracking lag.
 
@@ -143,6 +188,38 @@ Set `speed_vff_gain = 0` to disable CFF and observe `LOG_T_e_cmd_inte` wind up d
 
 ---
 
+## Current Loop & MTPA
+
+### MTPA decomposition
+
+The torque command is first converted to a stator current magnitude, then decomposed into d/q references using the Interior PM MTPA formula (active when `mtpa_en = 1`):
+
+```
+i_s = T_cmd / (1.5 × p × λ_pm)
+ΔL  = L_q − L_d
+i_d = (λ_pm − √(λ_pm² + 8·ΔL²·i_s²)) / (4·ΔL)
+i_q = sign(i_s) × √(i_s² − i_d²)
+```
+
+When `mtpa_en = 0`: `i_q = i_s`, `i_d = i_d_ref_manual` (manual d-axis injection).
+
+The resulting current vector is then **magnitude-clamped to 8 A** (preserving angle). Observe the effect of limiting via `LOG_i_d_ref_limited` and `LOG_i_q_ref_limited` vs. `LOG_i_d_ref` and `LOG_i_q_ref`.
+
+### Synchronous-frame PI current regulators
+
+Two independent PI regulators run in the rotating (d/q) frame at 10 kHz:
+
+```
+v_d = Kpd × e_d + Kid × ∫e_d                    (no BEMF term on d-axis)
+v_q = λ_pm × ω_e + Kpq × e_q + Kiq × ∫e_q      (back-EMF compensation on q-axis)
+```
+
+The q-axis BEMF term (`λ_pm × ω_e`) is a static model-based decoupling that removes the dominant speed-dependent disturbance, reducing the burden on the PI integrator at speed. There is no state-feedback cross-coupling decoupling between axes.
+
+Voltage commands are inverse-Park transformed to abc, then SVPWM common-mode is applied before writing duty cycles to the PWM peripheral.
+
+---
+
 ## CFF S-Curve Trajectory (Elevator Mode)
 
 The trajectory generates a **3-phase trapezoidal velocity profile** (ramp-up → cruise → ramp-down), adds torque feedforward so the PI integrator does not need to wind up during acceleration, then hands off to the position loop for a precise stop.
@@ -156,24 +233,90 @@ The trajectory generates a **3-phase trapezoidal velocity profile** (ramp-up →
 
 The decel entry is a one-way latch (`scurve_decel_latched`). Once braking begins the profile only ever decelerates — it never re-enters phase 0. Without the latch, `v_cur` and `braking_dist` both shrink each step and can push the condition back above the threshold, causing rapid 0↔1 toggling that corrupts the velocity profile.
 
-### Planning (per ISR step)
+### Trajectory initialization (`start_scurve_cff`)
+
+Called by `scurve_goto`, `scurve_goto_vel`, `elevator_floor`, and (when `scurve_en=1`) `set_theta_m_ref_abs/_rel`.
 
 ```
-remaining    = |target − LOG_theta_m_accum|
-braking_dist = v_cur² / (2 × a_max)
+// Guards (silent return on failure)
+if (!zero_accum_done)               → ignored, zero_accum required first
+if (|target − accum| < 0.01 rad)    → ignored, already at target
 
-if not latched AND remaining > braking_dist + 0.05:
-    v_cur += a_max × Ts          (clamp to v_max)
+// Setup
+scurve_target_theta  = target_rotations × 2π
+scurve_initial_delta = |target_theta − LOG_theta_m_accum|
+scurve_direction     = +1.0  if  target ≥ current,  else  −1.0
+scurve_v_cur         = 0.0              // always starts from rest
+scurve_decel_latched = 0
+LOG_theta_m_ref      = LOG_theta_m_accum   // seed at current position
+scurve_active        = 1
+en_position_loop     = 0                // open-loop during CFF trajectory
+```
+
+### Per-ISR update (`update_scurve_cff`, runs every 100 µs when `scurve_active`)
+
+```
+remaining    = |scurve_target_theta − LOG_theta_m_accum|
+braking_dist = scurve_v_cur² / (2 × a_max)
+
+// One-way decel latch
+if (!scurve_decel_latched  &&  remaining ≤ braking_dist + 0.05):
+    scurve_decel_latched = 1
+
+// Velocity ramp
+if (scurve_decel_latched):
+    scurve_v_cur -= a_max × Ts          // decelerate, clamped ≥ 0
 else:
-    latch = true
-    v_cur -= a_max × Ts          (clamp to 0)
+    scurve_v_cur += a_max × Ts          // accelerate, clamped ≤ v_max
 
-w_m_ref = direction × v_cur
+// Speed and position references (both updated every ISR)
+LOG_w_m_ref      = scurve_direction × scurve_v_cur
+LOG_theta_m_ref += LOG_w_m_ref × Ts    // integrate position along trajectory
 
-LOG_theta_m_ref += w_m_ref × Ts    # position reference tracks trajectory
+// Distance-based progress: 0.0 at start → 1.0 at target
+LOG_scurve_progress = 1.0 − (remaining / scurve_initial_delta)
+
+// Handoff: velocity near zero → close position loop
+if (scurve_decel_latched  &&  scurve_v_cur ≤ 0.3 rad/s):
+    scurve_active        = 0
+    en_position_loop     = 1,  pos_use_accum = 1
+    LOG_theta_m_ref      = scurve_target_theta   // small snap (tracking error only)
+    speed + position integrators cleared
+    scurve_decel_latched = 0                     // ready for next move
 ```
 
-Short moves are handled automatically — the motor begins decelerating immediately if `braking_dist ≥ remaining` from the very first step.
+Short moves: if `braking_dist ≥ remaining` from the very first ISR, the decel latch fires immediately — the motor decelerates without ever accelerating.
+
+`scurve_stop` aborts in place: zeroes velocity, clears `scurve_active`, and calls `set_theta_m_ref_abs(LOG_theta_m_accum)` to hold the current position.
+
+### Worked example: `elevator_floor 1` (10 rotations, 62.83 rad)
+
+Default parameters: `v_max = 18.0 rad/s`, `a_max = 2.5 rad/s²`, `Ts = 100 µs`
+
+Each ISR adds `Δv = a_max × Ts = 0.00025 rad/s`.
+
+The total distance is 62.83 rad. To accelerate all the way to `v_max` and then brake back to zero would need `v_max² / a_max = 18² / 2.5 = 129.6 rad` — more than twice the floor spacing. So **v_max is never reached**; the profile is a pure triangle (accel, then immediately decel at the midpoint).
+
+| t (s) | v_cur (rad/s) | dist covered (rad) | remaining (rad) | braking_dist (rad) | phase |
+|-------|--------------|-------------------|-----------------|-------------------|-------|
+| 0.00 | 0.000 | 0.000 | 62.832 | 0.000 | accel |
+| 1.00 | 2.500 | 1.250 | 61.582 | 1.250 | accel |
+| 2.00 | 5.000 | 5.000 | 57.832 | 5.000 | accel |
+| 3.00 | 7.500 | 11.250 | 51.582 | 11.250 | accel |
+| 4.00 | 10.000 | 20.000 | 42.832 | 20.000 | accel |
+| 5.00 | 12.500 | 31.250 | 31.582 | 31.250 | accel |
+| **5.01** | **12.528** | **31.391** | **31.441** | **31.391** | **← decel latch fires** |
+| 6.01 | 10.028 | 42.669 | 20.163 | 20.113 | decel |
+| 7.01 | 7.528 | 51.447 | 11.385 | 11.335 | decel |
+| 8.01 | 5.028 | 57.725 | 5.106 | 5.056 | decel |
+| 9.01 | 2.528 | 61.504 | 1.328 | 1.278 | decel |
+| **9.90** | **0.300** | **62.764** | **0.068** | **0.018** | **← handoff to position loop** |
+
+**Decel latch at t = 5.01 s:** `remaining (31.441) ≤ braking_dist + 0.05 (31.441)` — the condition is met. From this ISR forward `v_cur` only ever decrements. Without the latch, `v_cur` and `braking_dist` would shrink together each step and the condition would toggle on and off every few ISRs.
+
+**Handoff at t = 9.90 s:** `v_cur` hits 0.3 rad/s with 0.068 rad still to go. The trajectory ends, `LOG_theta_m_ref` snaps to the exact target (62.832 rad), and the position loop closes the remaining 0.068 rad. Total trajectory time: **9.9 s**.
+
+### Position reference integration (key detail)
 
 `LOG_theta_m_ref` is integrated each ISR alongside the velocity command. This keeps the position reference in sync with the trajectory so that at handoff the final snap to `scurve_target_theta` is a small correction (speed-tracking error only, typically < 0.1 rad) rather than the full remaining distance the motor may have undershot.
 
@@ -224,6 +367,15 @@ wolfpack elevator_set_spacing <rot>      # set rotations per floor (default 10.0
 | `set_speed_ki <val>` | `B × ω_gcf` | PI integral gain [N·m/rad] |
 | `set_speed_vff_gain <val>` | 1.0 | CFF torque feedforward gain (1.0 = full, 0 = off) |
 
+### Current loop
+| Command | Default | Description |
+|---------|---------|-------------|
+| `set_ireg_kpd <val>` | — | d-axis PI proportional gain |
+| `set_ireg_kid <val>` | — | d-axis PI integral gain |
+| `set_ireg_kpq <val>` | — | q-axis PI proportional gain |
+| `set_ireg_kiq <val>` | — | q-axis PI integral gain |
+| `set_mtpa_en <0\|1>` | 1 | MTPA enable (0 = manual i_d via set_i_d_ref_manual) |
+
 ### S-curve trajectory
 | Command | Default | Description |
 |---------|---------|-------------|
@@ -241,6 +393,7 @@ wolfpack elevator_set_spacing <rot>      # set rotations per floor (default 10.0
 
 ## Logged Variables
 
+### Position & trajectory
 | Variable | Description |
 |----------|-------------|
 | `LOG_theta_m` | Rotor angle, wrapped to [0, 2π) [rad] |
@@ -251,13 +404,40 @@ wolfpack elevator_set_spacing <rot>      # set rotations per floor (default 10.0
 | `LOG_pos_use_accum` | 0 = wrapped feedback, 1 = accumulator feedback |
 | `LOG_w_m_ref` | Speed reference from position loop [rad/s] |
 | `LOG_w_m_vff` | Velocity feedforward contribution [rad/s] |
+| `LOG_scurve_progress` | Trajectory progress 0.0 → 1.0 (distance-based) |
+| `LOG_scurve_remaining` | Remaining distance to target [rad] |
+| `LOG_scurve_phase` | Trajectory phase: 0=accel/cruise, 1=decel |
+
+### Speed & torque
+| Variable | Description |
+|----------|-------------|
+| `LOG_w_m` | Measured rotor speed, filtered [rad/s] |
+| `LOG_w_m_RPM` | Measured rotor speed [RPM] |
 | `LOG_T_e_cmd_prop` | Speed PI proportional torque [N·m] |
 | `LOG_T_e_cmd_inte` | Speed PI integral torque [N·m] |
 | `LOG_T_e_cmd_ff` | CFF torque feedforward [N·m] |
 | `LOG_T_e_cmd` | Total torque command [N·m] |
-| `LOG_scurve_progress` | Trajectory progress 0.0 → 1.0 (distance-based) |
-| `LOG_scurve_remaining` | Remaining distance to target [rad] |
-| `LOG_scurve_phase` | Trajectory phase: 0=accel/cruise, 1=decel |
+
+### Currents & voltages
+| Variable | Description |
+|----------|-------------|
+| `LOG_i_a`, `LOG_i_b`, `LOG_i_c` | Phase currents [A] |
+| `LOG_v_dc` | DC bus voltage [V] |
+| `LOG_i_d`, `LOG_i_q` | Park-transformed d/q currents [A] |
+| `LOG_i_d_ref`, `LOG_i_q_ref` | d/q current references before vector limiting [A] |
+| `LOG_i_d_ref_limited`, `LOG_i_q_ref_limited` | d/q references after 8 A vector clamp [A] |
+| `LOG_v_cmd_d`, `LOG_v_cmd_q` | dq voltage commands [V] |
+| `LOG_duty_a`, `LOG_duty_b`, `LOG_duty_c` | PWM duty cycles [0–1] |
+
+### Fault & diagnostics
+| Variable | Description |
+|----------|-------------|
+| `LOG_OV_status_dc` | 1 if DC over-voltage trip is active |
+| `LOG_OC_status_a`, `LOG_OC_status_b`, `LOG_OC_status_c` | 1 if per-phase OC trip active |
+| `LOG_protection_status` | Combined protection fault flag |
+| `LOG_wolf_state` | Current state machine value (0=CALIBRATE, 1=IDLE, 2=RUNNING, 3=TRIPPED) |
+| `LOG_control_looptime` | ISR scheduling period [s] |
+| `LOG_control_runtime` | ISR execution time [s] |
 
 
 ---
