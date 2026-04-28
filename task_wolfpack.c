@@ -231,7 +231,7 @@ static task_control_block_t tcb;  			// Scheduler TCB which holds task "context"
 //           w_allowed   = clamp(w_requested, -ramp_w_max, +ramp_w_max)
 //           LOG_theta_m_ref = out_prev + w_allowed * Ts
 // When |theta_remaining| <= ramp_w_max/Fs the ramp converges exactly to the target in one step.
-double ramp_w_max               = 50.0;   // speed limit for the reference ramp [rad/s]
+double ramp_w_max               = POS_W_M_REF_MAX_DEFAULT;   // speed limit for ramp and position loop [rad/s]
 double ramp_a_max = 5;
 double LOG_ramp_theta_target        = 0.0;   // final target position [rad]
 double ramp_theta_out_prev      = 0.0;   // ramp integrator state from previous ISR [rad]
@@ -247,6 +247,7 @@ double LOG_del_w_allowed        = 0.0;  // velocity increment from acceleration 
 double LOG_w_ref_out_limited_ramp = 0.0; // acceleration-limited velocity output [rad/s]
 double LOG_del_theta_allowed    = 0.0;  // position increment applied this step [rad]
 static int theta_feedback_initialized = 0;
+static int accum_initialized = 0;
 
 static void reset_position_mode_state(void)
 {
@@ -316,7 +317,6 @@ void task_wolfpack_callback(void *arg)
 
 	if (!theta_feedback_initialized) {
 		theta_m_prev = LOG_theta_m;
-		LOG_theta_m_accum = 0.0;
 		LOG_theta_m_fb = LOG_theta_m;
 		theta_m_ref_prev = LOG_theta_m;
 		theta_feedback_initialized = 1;
@@ -332,7 +332,9 @@ void task_wolfpack_callback(void *arg)
 	}
 	else { } 														// No need to change delta_theta_m if it's already within -PI to +PI;
 
-	LOG_theta_m_accum += LOG_delta_theta_m;
+	if (accum_initialized) {
+		LOG_theta_m_accum += LOG_delta_theta_m;
+	}
 
 	// ****** Math to calculate speed from difference in angle b/w control periods, filter the speed due to angle chatter, convert to rad/s, rad/s electrical, etc.
 	LOG_w_m = LOG_delta_theta_m * TASK_WOLFPACK_UPDATES_PER_SEC;	// Mechanical speed, [rad/s]
@@ -416,6 +418,7 @@ void task_wolfpack_callback(void *arg)
 		LOG_del_w_allowed        = 0.0;
 		LOG_w_ref_out_limited_ramp = 0.0;
 		LOG_del_theta_allowed    = 0.0;
+		accum_initialized        = 0;
 		LOG_T_e_cmd_prop = 0;
 		LOG_T_e_cmd_inte = 0;
 		LOG_T_e_cmd      = 0;
@@ -450,61 +453,53 @@ void task_wolfpack_callback(void *arg)
 			LOG_wolf_state = 1;
 		}
 
-		// === SPEED-LIMITED POSITION REFERENCE RAMP ===
-		// Advances LOG_theta_m_ref toward ramp_theta_target at most ramp_w_max [rad/s].
-		// When remaining distance <= ramp_w_max/Fs, the output snaps exactly to target.
-		// === SPEED + ACCELERATION LIMITED POSITION RAMP (Elevator Mode) ===
+		// === SPEED + ACCELERATION LIMITED POSITION RAMP with braking distance ===
 		if (ramp_active) {
-		    // Disable position regulator while ramp is active
-		    en_position_loop = 0;
+		    double remaining = LOG_ramp_theta_target - ramp_theta_out_prev;
+		    LOG_ramp_theta_remaining = remaining;
 
-		    LOG_ramp_theta_remaining = LOG_ramp_theta_target - ramp_theta_out_prev;
-		    LOG_ramp_w_requested = LOG_ramp_theta_remaining * TASK_WOLFPACK_UPDATES_PER_SEC;
+		    // Braking distance: distance needed to decelerate from current speed to zero
+		    double braking_dist = (LOG_ramp_w_allowed_prev * LOG_ramp_w_allowed_prev) / (2.0 * ramp_a_max);
 
-		    // Velocity limit
-		    if (LOG_ramp_w_requested > ramp_w_max) {
-		        LOG_ramp_w_allowed = ramp_w_max;
-		    } else if (LOG_ramp_w_requested < -ramp_w_max) {
-		        LOG_ramp_w_allowed = -ramp_w_max;
+		    // Target velocity: cruise at +/-w_max unless inside braking zone
+		    double v_target;
+		    if (remaining > 0) {
+		        v_target = ramp_w_max;
 		    } else {
-		        LOG_ramp_w_allowed = LOG_ramp_w_requested;
+		        v_target = -ramp_w_max;
+		    }
+		    if (fabs(remaining) <= braking_dist) {
+		        v_target = 0.0;
 		    }
 
-		    // Acceleration limit
-		    LOG_ramp_w_allowed_err = LOG_ramp_w_allowed - LOG_ramp_w_allowed_prev;
-		    LOG_a_requested = LOG_ramp_w_allowed_err * TASK_WOLFPACK_UPDATES_PER_SEC;
-
-		    if (LOG_a_requested > ramp_a_max) {
+		    // Acceleration-limit toward v_target
+		    double v_error = v_target - LOG_ramp_w_allowed_prev;
+		    double a_req = v_error / Ts;
+		    if (a_req > ramp_a_max) {
 		        LOG_ramp_a_allowed = ramp_a_max;
-		    } else if (LOG_a_requested < -ramp_a_max) {
+		    } else if (a_req < -ramp_a_max) {
 		        LOG_ramp_a_allowed = -ramp_a_max;
 		    } else {
-		        LOG_ramp_a_allowed = LOG_a_requested;
+		        LOG_ramp_a_allowed = a_req;
 		    }
 
 		    LOG_del_w_allowed = LOG_ramp_a_allowed * Ts;
-		    LOG_w_ref_out_limited_ramp = LOG_ramp_w_allowed_prev + LOG_del_w_allowed;
+		    double v_final = LOG_ramp_w_allowed_prev + LOG_del_w_allowed;
 
 		    // Update states
-		    LOG_ramp_w_allowed_prev = LOG_w_ref_out_limited_ramp;
-		    LOG_del_theta_allowed = LOG_w_ref_out_limited_ramp * Ts;
+		    LOG_ramp_w_allowed_prev = v_final;
+		    LOG_w_ref_out_limited_ramp = v_final;
+		    LOG_del_theta_allowed = v_final * Ts;
 
-		    // Directly command speed from ramp (position regulator is disabled)
-		    LOG_w_m_ref = LOG_w_ref_out_limited_ramp;
-
-		    // Advance position reference for logging / handoff
 		    LOG_theta_m_ref = ramp_theta_out_prev + LOG_del_theta_allowed;
 		    ramp_theta_out_prev = LOG_theta_m_ref;
 
-		    // === RAMP FINISH CONDITION ===
-		    if (fabs(LOG_ramp_theta_remaining) < 0.8 * ramp_w_max * Ts) {
-		        LOG_theta_m_ref = LOG_ramp_theta_target;
-		        ramp_theta_out_prev = LOG_ramp_theta_target;
-		        LOG_w_m_ref = 0.0;
-		        LOG_ramp_w_allowed_prev = 0.0;
+		    // Stop when very close and nearly stopped
+		    if (fabs(remaining) < 0.02) {
 		        ramp_active = 0;
+		        LOG_ramp_w_allowed_prev = 0.0;
 
-		        // Re-enable position regulator to HOLD final position
+		        // Re-enable position regulator to hold final position
 		        pos_use_accum = 1;
 		        en_position_loop = 1;
 		        LOG_theta_m_fb = LOG_theta_m_accum;
@@ -756,6 +751,8 @@ void task_wolfpack_callback(void *arg)
 void task_wolfpack_sm_run(void)
 {
 	sm_request_run = 1;
+	LOG_theta_m_accum = 0.0;
+	accum_initialized = 1;
 }
 
 void task_wolfpack_sm_idle(void)
@@ -936,6 +933,14 @@ int task_wolfpack_set_ramp_w_max(double w)
 {
     if (w <= 0.0) return FAILURE;
     ramp_w_max = w;
+    task_wolfpack_set_pos_w_m_ref_max(w);
+    return SUCCESS;
+}
+
+int task_wolfpack_set_ramp_a_max(double a)
+{
+    if (a <= 0.0) return FAILURE;
+    ramp_a_max = a;
     return SUCCESS;
 }
 

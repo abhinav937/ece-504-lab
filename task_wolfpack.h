@@ -39,6 +39,7 @@ int task_wolfpack_set_ireg_kiq(double ki);
 
 // Speed-limited position reference ramp
 int task_wolfpack_set_ramp_w_max(double w);
+int task_wolfpack_set_ramp_a_max(double a);
 
 // Ramp to absolute position in rotations
 int task_wolfpack_goto_rot(double rotations);

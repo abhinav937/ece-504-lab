@@ -32,7 +32,6 @@ static command_help_t cmd_help[] = {
 	{ "set_theta_m_ref_rel", "Add delta to current position ramp target; stacks: 5pi+5pi == 10pi [rad]" },
 	{ "set_pos_kp", "Set position-loop proportional gain [rad/s per rad]" },
 	{ "set_pos_ki", "Set position-loop integral gain [rad/s per rad*s]" },
-	{ "set_pos_w_m_ref_max", "Set position-loop speed command limit [rad/s]" },
 	{ "set_mtpa_en", "Enable (1) or disable (0) MTPA d/q current decomposition" },
 	{ "set_pos_vff_gain", "Set velocity feedforward gain (1.0=full, 0=off)" },
 	{ "set_speed_kp", "Set speed-loop proportional gain [N*m*s/rad]" },
@@ -41,7 +40,8 @@ static command_help_t cmd_help[] = {
 	{ "set_ireg_kid", "Set d-axis current-loop integral gain [V/(A*s)]" },
 	{ "set_ireg_kpq", "Set q-axis current-loop proportional gain [V/A]" },
 	{ "set_ireg_kiq", "Set q-axis current-loop integral gain [V/(A*s)]" },
-	{ "set_ramp_w_max", "Set position-reference ramp speed limit [rad/s] (default 50.0)" },
+	{ "set_ramp_w_max", "Set ramp + position-loop speed limit [rad/s] (single source of truth)" },
+	{ "set_ramp_a_max", "Set position-reference ramp acceleration limit [rad/s^2] (default 2.0)" },
 	{ "goto", "Ramp to absolute position <rotations> at ramp_w_max" },
 };
 
@@ -175,13 +175,6 @@ int cmd_wolfpack(int argc, char **argv)
         return CMD_SUCCESS;
     }
 
-    if (argc == 3 && STREQ("set_pos_w_m_ref_max", argv[1])) {
-        double w_max = strtod(argv[2], NULL);
-        if (task_wolfpack_set_pos_w_m_ref_max(w_max) != SUCCESS) {
-            return CMD_FAILURE;
-        }
-        return CMD_SUCCESS;
-    }
 
     if (argc == 3 && STREQ("set_mtpa_en", argv[1])) {
         int en = (int)strtol(argv[2], NULL, 10);
@@ -248,6 +241,12 @@ int cmd_wolfpack(int argc, char **argv)
     if (argc == 3 && STREQ("set_ramp_w_max", argv[1])) {
         double w = strtod(argv[2], NULL);
         if (task_wolfpack_set_ramp_w_max(w) != SUCCESS) return CMD_FAILURE;
+        return CMD_SUCCESS;
+    }
+
+    if (argc == 3 && STREQ("set_ramp_a_max", argv[1])) {
+        double a = strtod(argv[2], NULL);
+        if (task_wolfpack_set_ramp_a_max(a) != SUCCESS) return CMD_FAILURE;
         return CMD_SUCCESS;
     }
 
