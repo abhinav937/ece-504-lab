@@ -476,6 +476,9 @@ void task_wolfpack_callback(void *arg)
 		        LOG_ramp_w_allowed_prev  = 0.0;
 		        LOG_w_ref_out_limited_ramp = 0.0;
 		        LOG_ramp_approach_active = 0;
+		        LOG_a_requested          = 0.0;
+		        LOG_ramp_a_allowed       = 0.0;
+		        LOG_del_w_allowed        = 0.0;
 		        LOG_theta_m_ref          = LOG_ramp_theta_target;
 		    } else {
 		        // Proportional approach: naturally slows as motor nears target.
@@ -499,14 +502,17 @@ void task_wolfpack_callback(void *arg)
 
 		        // Acceleration limiter: smooths start-up and direction changes.
 		        double a_cmd = (v_target - LOG_ramp_w_allowed_prev) / Ts;
+		        LOG_a_requested = a_cmd;
 		        if (a_cmd > ramp_a_max) {
 		            a_cmd = ramp_a_max;
 		        }
 		        if (a_cmd < -ramp_a_max) {
 		            a_cmd = -ramp_a_max;
 		        }
+		        LOG_ramp_a_allowed = a_cmd;
 
 		        double v_new = LOG_ramp_w_allowed_prev + a_cmd * Ts;
+		        LOG_del_w_allowed = v_new - LOG_ramp_w_allowed_prev;
 		        ramp_theta_out_prev        += v_new * Ts;
 		        LOG_theta_m_ref             = ramp_theta_out_prev;
 		        LOG_ramp_w_allowed_prev     = v_new;
