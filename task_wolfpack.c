@@ -262,6 +262,7 @@ static void reset_position_mode_state(void)
 	ramp_active = 0;
 	LOG_ramp_w_allowed_prev = 0.0;
 	LOG_w_ref_out_limited_ramp = 0.0;
+	accum_initialized = 0;
 }
 
 int task_wolfpack_init(void)
@@ -296,45 +297,48 @@ void task_wolfpack_callback(void *arg)
     LOG_control_looptime = cpu_timer_ticks_to_usec(looptime);
 
     // Sample encoder (from AMDC directly) and analog inputs (from AMDS sensor cards)
-	encoder_get_position(&LOG_enc_pos_data);			// Encoder position from FPGA on AMDC
-	// Sample AMDS data
-    amds_get_data(1, AMDS_CH_1, &LOG_amds_ch_1_data);	// HV Voltage Sensor
-    amds_get_data(1, AMDS_CH_2, &LOG_amds_ch_2_data);	// Current Sensor, Phase A
-    amds_get_data(1, AMDS_CH_4, &LOG_amds_ch_4_data);	// Current Sensor, Phase B
+    encoder_get_position(&LOG_enc_pos_data);
+
+    // Sample AMDS analog inputs (IMPORTANT - was missing)
+    amds_get_data(1, AMDS_CH_1, &LOG_amds_ch_1_data); // HV Voltage
+    amds_get_data(1, AMDS_CH_2, &LOG_amds_ch_2_data); // Phase A Current
+    amds_get_data(1, AMDS_CH_4, &LOG_amds_ch_4_data); // Phase B Current
     LOG_amds_valid = amds_check_data_validity(1);
+    // Convert raw encoder counts to mechanical angle in radians
+    LOG_theta_m = PI2 * (double)LOG_enc_pos_data * ENCODER_COUNTS_INV + THETA_M_OFFSET;
 
-	// Convert encoder angle counts radians
-	LOG_theta_m = (double) PI2 * (LOG_enc_pos_data) * (double)ENCODER_COUNTS_INV + (double)THETA_M_OFFSET;
+    // ====================== ACCUMULATOR + DELTA ======================
+    if (!theta_feedback_initialized) {
+        theta_m_prev = LOG_theta_m;
+        LOG_theta_m_accum = LOG_theta_m;     // Start accumulator at current position
+        accum_initialized = 1;
+        LOG_theta_m_fb = LOG_theta_m;
+        theta_m_ref_prev = LOG_theta_m;
+        theta_feedback_initialized = 1;
+    }
 
-	// ********** Logic to ensure that theta_m is bound between 0 and 2*PI. **************
-	if(LOG_theta_m < 0)
-	{				// If theta_m is a negative number, add integer number (floor) 2*PI to yield positive theta_m
-		LOG_theta_m += PI2*fabs(floor(LOG_theta_m * ONE_OVER_PI2 ));
-	}
-	LOG_theta_m = fmod(LOG_theta_m, PI2); 							// Wrap theta_m to 0 to 2*PI;
-	LOG_theta_e = LOG_theta_m * POLE_PAIRS;							// Convert from mechanical to electrical angle
-	LOG_theta_e = fmod(LOG_theta_e + PI2, PI2);  					// Wrap theta_e to 0 to 2*PI;
+    // Calculate delta theta (with unwrap)
+    LOG_delta_theta_m = LOG_theta_m - theta_m_prev;
 
-	if (!theta_feedback_initialized) {
-		theta_m_prev = LOG_theta_m;
-		LOG_theta_m_fb = LOG_theta_m;
-		theta_m_ref_prev = LOG_theta_m;
-		theta_feedback_initialized = 1;
-	}
+    if (LOG_delta_theta_m < -PI) {
+        LOG_delta_theta_m += PI2;
+    } else if (LOG_delta_theta_m > PI) {
+        LOG_delta_theta_m -= PI2;
+    }
 
-	// ********** Logic to ensure change in theta_m (delta_theta_m) is bound between + and - PI when rolling over. **************
-	LOG_delta_theta_m = LOG_theta_m - theta_m_prev;					// Logic to properly deal with roll-over of increment in angle
-	if (LOG_delta_theta_m < -PI){
-		LOG_delta_theta_m = LOG_theta_m - theta_m_prev + PI2;		// If delta_theta_m is <-PI, add 2*PI to it.
-	}
-	else if (LOG_delta_theta_m > PI){
-		LOG_delta_theta_m = LOG_theta_m - theta_m_prev - PI2;		// If delta_theta_m is >PI, subtract 2*PI from it.
-	}
-	else { } 														// No need to change delta_theta_m if it's already within -PI to +PI;
+    // Update unwrapped accumulator
+    LOG_theta_m_accum += LOG_delta_theta_m;
 
-	if (accum_initialized) {
-		LOG_theta_m_accum += LOG_delta_theta_m;
-	}
+    // Wrap LOG_theta_m for single-revolution use
+    LOG_theta_m = fmod(LOG_theta_m, PI2);
+    if (LOG_theta_m < 0.0) {
+        LOG_theta_m += PI2;
+    }
+
+    LOG_theta_e = fmod(LOG_theta_m * POLE_PAIRS, PI2);
+
+    // Update previous value for next cycle
+    theta_m_prev = LOG_theta_m;
 
 	// ****** Math to calculate speed from difference in angle b/w control periods, filter the speed due to angle chatter, convert to rad/s, rad/s electrical, etc.
 	LOG_w_m = LOG_delta_theta_m * TASK_WOLFPACK_UPDATES_PER_SEC;	// Mechanical speed, [rad/s]
@@ -453,58 +457,51 @@ void task_wolfpack_callback(void *arg)
 			LOG_wolf_state = 1;
 		}
 
-		// === SPEED + ACCELERATION LIMITED POSITION RAMP with braking distance ===
+		// === IMPROVED SPEED + ACCELERATION LIMITED RAMP ===
+		// === IMPROVED RAMP + SMOOTH HANDOVER ===
 		if (ramp_active) {
 		    double remaining = LOG_ramp_theta_target - ramp_theta_out_prev;
-		    LOG_ramp_theta_remaining = remaining;
 
-		    // Braking distance: distance needed to decelerate from current speed to zero
-		    double braking_dist = (LOG_ramp_w_allowed_prev * LOG_ramp_w_allowed_prev) / (2.0 * ramp_a_max);
-
-		    // Target velocity: cruise at +/-w_max unless inside braking zone
-		    double v_target;
-		    if (remaining > 0) {
-		        v_target = ramp_w_max;
-		    } else {
-		        v_target = -ramp_w_max;
-		    }
-		    if (fabs(remaining) <= braking_dist) {
-		        v_target = 0.0;
-		    }
-
-		    // Acceleration-limit toward v_target
-		    double v_error = v_target - LOG_ramp_w_allowed_prev;
-		    double a_req = v_error / Ts;
-		    if (a_req > ramp_a_max) {
-		        LOG_ramp_a_allowed = ramp_a_max;
-		    } else if (a_req < -ramp_a_max) {
-		        LOG_ramp_a_allowed = -ramp_a_max;
-		    } else {
-		        LOG_ramp_a_allowed = a_req;
-		    }
-
-		    LOG_del_w_allowed = LOG_ramp_a_allowed * Ts;
-		    double v_final = LOG_ramp_w_allowed_prev + LOG_del_w_allowed;
-
-		    // Update states
-		    LOG_ramp_w_allowed_prev = v_final;
-		    LOG_w_ref_out_limited_ramp = v_final;
-		    LOG_del_theta_allowed = v_final * Ts;
-
-		    LOG_theta_m_ref = ramp_theta_out_prev + LOG_del_theta_allowed;
-		    ramp_theta_out_prev = LOG_theta_m_ref;
-
-		    // Stop when very close and nearly stopped
-		    if (fabs(remaining) < 0.02) {
+		    if (fabs(remaining) < 0.015 && fabs(LOG_ramp_w_allowed_prev) < 0.08) {
 		        ramp_active = 0;
 		        LOG_ramp_w_allowed_prev = 0.0;
+		        LOG_w_ref_out_limited_ramp = 0.0;
 
-		        // Re-enable position regulator to hold final position
-		        pos_use_accum = 1;
-		        en_position_loop = 1;
-		        LOG_theta_m_fb = LOG_theta_m_accum;
+		        // Optional: hold the last ramp position for 200 ms to let position loop settle
+		        static uint32_t settle_count = 0;
+		        if (settle_count < 200) {          // 200 × 1 ms = 200 ms
+		            settle_count++;
+		            LOG_theta_m_ref = ramp_theta_out_prev;   // hold last ramp value
+		        } else {
+		            settle_count = 0;
+		        }
+		    }
+		    else {
+		        // Normal acceleration-limited ramp (same as before)
+		        double v_target = (remaining > 0) ? ramp_w_max : -ramp_w_max;
+		        double braking_dist = (LOG_ramp_w_allowed_prev * LOG_ramp_w_allowed_prev)
+		                              / (2.0 * ramp_a_max * 1.15);   // 1.15 is safer than 1.2
+
+		        if (fabs(remaining) < braking_dist) {
+		            v_target = 0.0;
+		        }
+
+		        double a_cmd = (v_target - LOG_ramp_w_allowed_prev) / Ts;
+		        a_cmd = fmax(-ramp_a_max, fmin(ramp_a_max, a_cmd));
+
+		        double v_new = LOG_ramp_w_allowed_prev + a_cmd * Ts;
+		        double delta = v_new * Ts;
+		        ramp_theta_out_prev += delta;
+
+		        LOG_theta_m_ref = ramp_theta_out_prev;
+		        LOG_ramp_w_allowed_prev = v_new;
+		        LOG_w_ref_out_limited_ramp = v_new;
 		    }
 		}
+
+		// Always run position loop in RUNNING state (even after ramp finishes)
+		en_position_loop = 1;
+		pos_use_accum = 1;
 
 		LOG_pwm_state = pwm_enable();				// Enable PWMs
 		break;
@@ -750,9 +747,11 @@ void task_wolfpack_callback(void *arg)
 
 void task_wolfpack_sm_run(void)
 {
+	if (!accum_initialized) {
+		LOG_theta_m_accum = LOG_theta_m;
+		accum_initialized = 1;
+	}
 	sm_request_run = 1;
-	LOG_theta_m_accum = 0.0;
-	accum_initialized = 1;
 }
 
 void task_wolfpack_sm_idle(void)
