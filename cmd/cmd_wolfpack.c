@@ -42,6 +42,8 @@ static command_help_t cmd_help[] = {
 	{ "set_ireg_kiq", "Set q-axis current-loop integral gain [V/(A*s)]" },
 	{ "set_ramp_w_max", "Set ramp + position-loop speed limit [rad/s] (single source of truth)" },
 	{ "set_ramp_a_max", "Set position-reference ramp acceleration limit [rad/s^2] (default 2.0)" },
+	{ "set_ramp_approach_gain", "Proportional approach gain [1/s]: v=gain*remaining, default 1.0. Lower=slower near target." },
+	{ "set_ramp_snap_threshold", "Snap position ref to target when |remaining| <= this [rad], default 0.1 (~5.7 deg)" },
 	{ "goto", "Ramp to absolute position <rotations> at ramp_w_max" },
 };
 
@@ -247,6 +249,18 @@ int cmd_wolfpack(int argc, char **argv)
     if (argc == 3 && STREQ("set_ramp_a_max", argv[1])) {
         double a = strtod(argv[2], NULL);
         if (task_wolfpack_set_ramp_a_max(a) != SUCCESS) return CMD_FAILURE;
+        return CMD_SUCCESS;
+    }
+
+    if (argc == 3 && STREQ("set_ramp_approach_gain", argv[1])) {
+        double gain = strtod(argv[2], NULL);
+        if (task_wolfpack_set_ramp_approach_gain(gain) != SUCCESS) return CMD_FAILURE;
+        return CMD_SUCCESS;
+    }
+
+    if (argc == 3 && STREQ("set_ramp_snap_threshold", argv[1])) {
+        double t = strtod(argv[2], NULL);
+        if (task_wolfpack_set_ramp_snap_threshold(t) != SUCCESS) return CMD_FAILURE;
         return CMD_SUCCESS;
     }
 

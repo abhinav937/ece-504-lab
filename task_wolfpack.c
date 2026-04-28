@@ -246,6 +246,10 @@ double LOG_ramp_a_allowed       = 0.0;  // clamped acceleration [rad/s^2]
 double LOG_del_w_allowed        = 0.0;  // velocity increment from acceleration limit [rad/s]
 double LOG_w_ref_out_limited_ramp = 0.0; // acceleration-limited velocity output [rad/s]
 double LOG_del_theta_allowed    = 0.0;  // position increment applied this step [rad]
+double ramp_approach_gain       = 1.0;  // proportional approach gain [1/s]: v_cmd = gain * |remaining|
+double ramp_snap_threshold      = 0.1;  // snap to target when |remaining| <= this [rad]  (~5.7 deg)
+int    LOG_ramp_approach_active = 0;    // 1 = in proportional zone, 0 = at w_max cruise
+
 static int theta_feedback_initialized = 0;
 static int accum_initialized = 0;
 
@@ -262,6 +266,7 @@ static void reset_position_mode_state(void)
 	ramp_active = 0;
 	LOG_ramp_w_allowed_prev = 0.0;
 	LOG_w_ref_out_limited_ramp = 0.0;
+	LOG_ramp_approach_active = 0;
 	accum_initialized = 0;
 }
 
@@ -422,6 +427,7 @@ void task_wolfpack_callback(void *arg)
 		LOG_del_w_allowed        = 0.0;
 		LOG_w_ref_out_limited_ramp = 0.0;
 		LOG_del_theta_allowed    = 0.0;
+		LOG_ramp_approach_active = 0;
 		accum_initialized        = 0;
 		LOG_T_e_cmd_prop = 0;
 		LOG_T_e_cmd_inte = 0;
@@ -457,45 +463,54 @@ void task_wolfpack_callback(void *arg)
 			LOG_wolf_state = 1;
 		}
 
-		// === IMPROVED SPEED + ACCELERATION LIMITED RAMP ===
-		// === IMPROVED RAMP + SMOOTH HANDOVER ===
+		// === PROPORTIONAL APPROACH RAMP + SNAP HANDOVER ===
+		// v_cmd = gain * |remaining|, capped at w_max.
+		// Snap to exact target when within ramp_snap_threshold (default 0.1 rad ≈ 5.7°).
 		if (ramp_active) {
 		    double remaining = LOG_ramp_theta_target - ramp_theta_out_prev;
+		    LOG_ramp_theta_remaining = remaining;
 
-		    if (fabs(remaining) < 0.015 && fabs(LOG_ramp_w_allowed_prev) < 0.08) {
-		        ramp_active = 0;
-		        LOG_ramp_w_allowed_prev = 0.0;
+		    if (fabs(remaining) <= ramp_snap_threshold) {
+		        // Within snap zone: give position loop the exact target to close the gap cleanly.
+		        ramp_active              = 0;
+		        LOG_ramp_w_allowed_prev  = 0.0;
 		        LOG_w_ref_out_limited_ramp = 0.0;
-
-		        // Optional: hold the last ramp position for 200 ms to let position loop settle
-		        static uint32_t settle_count = 0;
-		        if (settle_count < 200) {          // 200 � 1 ms = 200 ms
-		            settle_count++;
-		            LOG_theta_m_ref = ramp_theta_out_prev;   // hold last ramp value
+		        LOG_ramp_approach_active = 0;
+		        LOG_theta_m_ref          = LOG_ramp_theta_target;
+		    } else {
+		        // Proportional approach: naturally slows as motor nears target.
+		        // No separate braking-distance check needed — gain * remaining → 0 as remaining → 0.
+		        double prop_v = ramp_approach_gain * fabs(remaining);
+		        double v_mag;
+		        if (prop_v < ramp_w_max) {
+		            v_mag = prop_v;
+		            LOG_ramp_approach_active = 1;
 		        } else {
-		            settle_count = 0;
-		        }
-		    }
-		    else {
-		        // Normal acceleration-limited ramp (same as before)
-		        double v_target = (remaining > 0) ? ramp_w_max : -ramp_w_max;
-		        double braking_dist = (LOG_ramp_w_allowed_prev * LOG_ramp_w_allowed_prev)
-		                              / (2.0 * ramp_a_max * 1.15);   // 1.15 is safer than 1.2
-
-		        if (fabs(remaining) < braking_dist) {
-		            v_target = 0.0;
+		            v_mag = ramp_w_max;
+		            LOG_ramp_approach_active = 0;
 		        }
 
+		        double v_target;
+		        if (remaining > 0.0) {
+		            v_target = v_mag;
+		        } else {
+		            v_target = -v_mag;
+		        }
+
+		        // Acceleration limiter: smooths start-up and direction changes.
 		        double a_cmd = (v_target - LOG_ramp_w_allowed_prev) / Ts;
-		        a_cmd = fmax(-ramp_a_max, fmin(ramp_a_max, a_cmd));
+		        if (a_cmd > ramp_a_max) {
+		            a_cmd = ramp_a_max;
+		        }
+		        if (a_cmd < -ramp_a_max) {
+		            a_cmd = -ramp_a_max;
+		        }
 
 		        double v_new = LOG_ramp_w_allowed_prev + a_cmd * Ts;
-		        double delta = v_new * Ts;
-		        ramp_theta_out_prev += delta;
-
-		        LOG_theta_m_ref = ramp_theta_out_prev;
-		        LOG_ramp_w_allowed_prev = v_new;
-		        LOG_w_ref_out_limited_ramp = v_new;
+		        ramp_theta_out_prev        += v_new * Ts;
+		        LOG_theta_m_ref             = ramp_theta_out_prev;
+		        LOG_ramp_w_allowed_prev     = v_new;
+		        LOG_w_ref_out_limited_ramp  = v_new;
 		    }
 		}
 
@@ -940,6 +955,20 @@ int task_wolfpack_set_ramp_a_max(double a)
 {
     if (a <= 0.0) return FAILURE;
     ramp_a_max = a;
+    return SUCCESS;
+}
+
+int task_wolfpack_set_ramp_approach_gain(double gain)
+{
+    if (gain <= 0.0) return FAILURE;
+    ramp_approach_gain = gain;
+    return SUCCESS;
+}
+
+int task_wolfpack_set_ramp_snap_threshold(double threshold_rad)
+{
+    if (threshold_rad < 0.0) return FAILURE;
+    ramp_snap_threshold = threshold_rad;
     return SUCCESS;
 }
 
