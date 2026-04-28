@@ -225,30 +225,27 @@ double LOG_control_runtime = 0;
 static uint32_t last_now_start = 0;
 static task_control_block_t tcb;  			// Scheduler TCB which holds task "context"
 
-// ==================== SPEED-LIMITED POSITION REFERENCE RAMP ====================
-// Each ISR: theta_remaining = target - out_prev
-//           w_requested = theta_remaining * Fs   (distance to cover in one step)
-//           w_allowed   = clamp(w_requested, -ramp_w_max, +ramp_w_max)
-//           LOG_theta_m_ref = out_prev + w_allowed * Ts
-// When |theta_remaining| <= ramp_w_max/Fs the ramp converges exactly to the target in one step.
+// ==================== PROPORTIONAL APPROACH RAMP ====================
+// Each ISR: remaining = target - ramp_integrator
+//           v_cmd = gain * |remaining|, capped at ramp_w_max
+//           a_cmd = (v_cmd - v_prev) / Ts, clamped to ±ramp_a_max
+//           ramp_integrator += (v_prev + a_cmd*Ts) * Ts
+//           LOG_theta_m_ref = ramp_integrator
+// Snap: when |remaining| <= ramp_snap_threshold, set LOG_theta_m_ref = target exactly.
 double ramp_w_max               = POS_W_M_REF_MAX_DEFAULT;   // speed limit for ramp and position loop [rad/s]
-double ramp_a_max = 5;
-double LOG_ramp_theta_target        = 0.0;   // final target position [rad]
+double ramp_a_max               = 5.0;   // acceleration limit [rad/s^2]
+double LOG_ramp_theta_target    = 0.0;   // final target position [rad]
 double ramp_theta_out_prev      = 0.0;   // ramp integrator state from previous ISR [rad]
 int    ramp_active              = 0;     // 1 while ramp is tracking towards target
-double LOG_ramp_theta_remaining = 0.0;  // distance left to target [rad]
-double LOG_ramp_w_requested     = 0.0;  // unclamped speed needed to close in one step [rad/s]
-double LOG_ramp_w_allowed       = 0.0;  // clamped speed [rad/s]
-double LOG_ramp_w_allowed_prev  = 0.0;  // previous ISR ramp_w_allowed [rad/s]
-double LOG_ramp_w_allowed_err   = 0.0;  // delta velocity this step [rad/s]
-double LOG_a_requested          = 0.0;  // unclamped acceleration [rad/s^2]
-double LOG_ramp_a_allowed       = 0.0;  // clamped acceleration [rad/s^2]
-double LOG_del_w_allowed        = 0.0;  // velocity increment from acceleration limit [rad/s]
-double LOG_w_ref_out_limited_ramp = 0.0; // acceleration-limited velocity output [rad/s]
-double LOG_del_theta_allowed    = 0.0;  // position increment applied this step [rad]
-double ramp_approach_gain       = 1.0;  // proportional approach gain [1/s]: v_cmd = gain * |remaining|
-double ramp_snap_threshold      = 0.1;  // snap to target when |remaining| <= this [rad]  (~5.7 deg)
-int    LOG_ramp_approach_active = 0;    // 1 = in proportional zone, 0 = at w_max cruise
+double LOG_ramp_theta_remaining = 0.0;   // distance left to target [rad]
+double LOG_ramp_w_allowed_prev  = 0.0;   // velocity from previous ISR [rad/s]
+double LOG_a_requested          = 0.0;   // unclamped acceleration [rad/s^2]
+double LOG_ramp_a_allowed       = 0.0;   // clamped acceleration [rad/s^2]
+double LOG_del_w_allowed        = 0.0;   // velocity increment applied this step [rad/s]
+double LOG_w_ref_out_limited_ramp = 0.0; // ramp velocity output [rad/s]
+double ramp_approach_gain       = 1.0;   // proportional gain [1/s]: v_cmd = gain * |remaining|
+double ramp_snap_threshold      = 0.1;   // snap threshold [rad] (~5.7 deg)
+int    LOG_ramp_approach_active = 0;     // 1 = proportional zone, 0 = cruise at w_max
 
 static int theta_feedback_initialized = 0;
 static int accum_initialized = 0;
@@ -417,17 +414,13 @@ void task_wolfpack_callback(void *arg)
 		ramp_active              = 0;
 		LOG_ramp_theta_target    = 0.0;
 		ramp_theta_out_prev      = 0.0;
-		LOG_ramp_theta_remaining = 0.0;
-		LOG_ramp_w_requested     = 0.0;
-		LOG_ramp_w_allowed       = 0.0;
-		LOG_ramp_w_allowed_prev  = 0.0;
-		LOG_ramp_w_allowed_err   = 0.0;
-		LOG_a_requested          = 0.0;
-		LOG_ramp_a_allowed       = 0.0;
-		LOG_del_w_allowed        = 0.0;
+		LOG_ramp_theta_remaining  = 0.0;
+		LOG_ramp_w_allowed_prev   = 0.0;
+		LOG_a_requested           = 0.0;
+		LOG_ramp_a_allowed        = 0.0;
+		LOG_del_w_allowed         = 0.0;
 		LOG_w_ref_out_limited_ramp = 0.0;
-		LOG_del_theta_allowed    = 0.0;
-		LOG_ramp_approach_active = 0;
+		LOG_ramp_approach_active  = 0;
 		accum_initialized        = 0;
 		LOG_T_e_cmd_prop = 0;
 		LOG_T_e_cmd_inte = 0;
